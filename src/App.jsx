@@ -27,18 +27,23 @@ const PROB_COMPONENTS = [
 ]
 
 const COLUMNS_CONFIG = [
-  { key: 'account_name',  label: 'Account',       defaultVisible: true },
-  { key: 'new_arr',       label: 'ARR',           defaultVisible: true },
-  { key: 'type',          label: 'Type',          defaultVisible: true },
-  { key: 'country',       label: 'Country',       defaultVisible: true },
-  { key: 'probability',   label: 'Probability',   defaultVisible: true },
-  { key: 'status',        label: 'Status',        defaultVisible: true },
-  { key: 'tracks',        label: 'Tracks',        defaultVisible: true },
-  { key: 'flowla',        label: 'Flowla',        defaultVisible: true },
-  { key: 'last_update',   label: 'Last Update',   defaultVisible: true },
-  { key: 'service_order', label: 'Service Order', defaultVisible: false },
-  { key: 'contact',       label: 'Contact',       defaultVisible: false },
-  { key: 'created',       label: 'Created',       defaultVisible: false },
+  { key: 'opportunity_name', label: 'Opportunity',   defaultVisible: true },
+  { key: 'account_name',    label: 'Account',        defaultVisible: true },
+  { key: 'stage',           label: 'Stage',          defaultVisible: true },
+  { key: 'close_date',      label: 'Close Date',     defaultVisible: true },
+  { key: 'new_arr',         label: 'Annual Deal Size', defaultVisible: true },
+  { key: 'forecast',        label: 'Forecast',       defaultVisible: true },
+  { key: 'added_arr',       label: 'Added ARR',      defaultVisible: true },
+  { key: 'probability',     label: 'Probability',    defaultVisible: true },
+  { key: 'status',          label: 'Status',         defaultVisible: true },
+  { key: 'type',            label: 'Type',           defaultVisible: false },
+  { key: 'country',         label: 'Country',        defaultVisible: false },
+  { key: 'tracks',          label: 'Tracks',         defaultVisible: false },
+  { key: 'flowla',          label: 'Flowla',         defaultVisible: false },
+  { key: 'last_update',     label: 'Last Update',    defaultVisible: false },
+  { key: 'service_order',   label: 'Service Order',  defaultVisible: false },
+  { key: 'contact',         label: 'Contact',        defaultVisible: false },
+  { key: 'created',         label: 'Created',        defaultVisible: false },
 ]
 
 const COUNTRIES = ['Argentina','Brazil','Chile','Colombia','Mexico','Peru','Ecuador','Uruguay','Paraguay','Bolivia','Venezuela','Costa Rica','Panama','Dominican Republic','Guatemala','USA','Canada','Spain','Other']
@@ -51,6 +56,16 @@ const SERVICE_ORDER_LABELS = Object.fromEntries(Object.entries(SERVICE_ORDER_KEY
 const FLOWLA_OPTIONS = ['None', 'Low', 'High']
 const FLOWLA_KEYS = { 'None': 'none', 'Low': 'low', 'High': 'high' }
 const FLOWLA_LABELS = { none: 'None', low: 'Low', high: 'High' }
+
+const DEAL_STAGES = [
+  { key: 'prospecting',          label: 'Prospecting' },
+  { key: 'qualification',        label: 'Qualification' },
+  { key: 'needs_analysis',       label: 'Needs Analysis' },
+  { key: 'sales_call_completed', label: 'Sales Call Completed' },
+  { key: 'technical_alignment',  label: 'Technical Alignment' },
+  { key: 'proposal',             label: 'Proposal / Price Quote' },
+  { key: 'contract_negotiation', label: 'Contract Negotiation' },
+]
 
 const LEAD_STAGES = [
   { key: 'new',             label: 'New',             color: '#6366f1', bg: '#eef2ff' },
@@ -84,6 +99,16 @@ const DEFAULT_DATA = {
   leads: [],
   settings: { quota_target: 0, quota_quarter: 'Q2 2026' },
 }
+
+const SEED_DEALS = [
+  { opportunity_name: 'BEES (Brasil) - Renewal 2026/27', account_name: 'BEES (Brasil)', stage: 'contract_negotiation', close_date: '2026-06-30', new_arr: 70650, added_arr: 9650, type: 'upsell', country: 'Brazil' },
+  { opportunity_name: 'Pepe Ganga CO', account_name: 'Pepe Ganga CO', stage: 'contract_negotiation', close_date: '2026-06-30', new_arr: 29400, added_arr: 29400, type: 'new_business', country: 'Colombia' },
+  { opportunity_name: 'Auto Mercado Renewal 2026/2027', account_name: 'Auto Mercado (Costa Rica)', stage: 'sales_call_completed', close_date: '2026-06-30', new_arr: 10992, added_arr: 2592, type: 'upsell', country: 'Costa Rica' },
+  { opportunity_name: 'Tu Drogueria Virtual | Web & App', account_name: 'Unidrogas - Tu Drogueria', stage: 'technical_alignment', close_date: '2026-05-31', new_arr: 20544, added_arr: 20544, type: 'new_business', country: 'Colombia' },
+  { opportunity_name: 'Borgata App (BetMGM) | 100K MAU', account_name: 'BetMGM', stage: 'technical_alignment', close_date: '2026-06-30', new_arr: 36000, added_arr: 36000, type: 'new_business', country: 'USA' },
+  { opportunity_name: 'JCA Group - App&Web', account_name: 'Grupo JCA', stage: 'sales_call_completed', close_date: '2026-06-30', new_arr: 47500, added_arr: 47500, type: 'new_business', country: 'Brazil' },
+  { opportunity_name: 'Banco BMG 1M MAU + 100K PV', account_name: 'Banco BMG', stage: 'contract_negotiation', close_date: '2026-09-30', new_arr: 92100, added_arr: 92100, type: 'new_business', country: 'Brazil' },
+]
 
 // ---- Helpers ----
 
@@ -197,7 +222,49 @@ export default function App() {
 
   useEffect(() => {
     const saved = loadData()
-    if (saved) setData(d => ({ ...DEFAULT_DATA, ...saved }))
+    if (saved) {
+      let merged = { ...DEFAULT_DATA, ...saved }
+      // Seed pipeline deals if empty
+      if (!merged.deals || merged.deals.length === 0) {
+        const now = new Date().toISOString()
+        const seededDeals = []
+        const seededTracks = []
+        const seededScores = {}
+        SEED_DEALS.forEach(seed => {
+          const id = genId()
+          seededDeals.push({
+            id, ...seed, contact_name: '', deal_status: 'open', probability: 0,
+            last_meeting_date: '', last_update_note: '', last_update_date: '',
+            service_order_status: 'not_applicable', flowla_engagement: 'none',
+            flowla_url: '', notes: '', created_at: now, updated_at: now,
+          })
+          seededTracks.push(...createTrackRows(id))
+          seededScores[id] = defaultScores()
+        })
+        merged = { ...merged, deals: seededDeals, tracks: [...(merged.tracks || []), ...seededTracks], scores: { ...merged.scores, ...seededScores } }
+      }
+      setData(merged)
+    } else {
+      // First time: seed with deals
+      const now = new Date().toISOString()
+      const seededDeals = []
+      const seededTracks = []
+      const seededScores = {}
+      SEED_DEALS.forEach(seed => {
+        const id = genId()
+        seededDeals.push({
+          id, ...seed, contact_name: '', deal_status: 'open', probability: 0,
+          last_meeting_date: '', last_update_note: '', last_update_date: '',
+          service_order_status: 'not_applicable', flowla_engagement: 'none',
+          flowla_url: '', notes: '', created_at: now, updated_at: now,
+        })
+        seededTracks.push(...createTrackRows(id))
+        seededScores[id] = defaultScores()
+      })
+      setData({ ...DEFAULT_DATA, deals: seededDeals, tracks: seededTracks, scores: seededScores })
+    }
+    // Reset column visibility to pick up new columns
+    setVisibleCols(defaultCols())
   }, [])
 
   const saveRef = useRef(null)
@@ -214,9 +281,13 @@ export default function App() {
     const now = new Date().toISOString()
     const deal = {
       id,
+      opportunity_name: form.opportunity_name || '',
       account_name: form.account_name || '',
       contact_name: form.contact_name || '',
+      stage: form.stage || 'prospecting',
+      close_date: form.close_date || '',
       new_arr: Number(form.new_arr) || 0,
+      added_arr: Number(form.added_arr) || 0,
       type: form.type || 'new_business',
       country: form.country || '',
       deal_status: form.deal_status || 'open',
@@ -245,6 +316,7 @@ export default function App() {
       deals: d.deals.map(deal => deal.id !== id ? deal : {
         ...deal, ...form,
         new_arr: Number(form.new_arr) || 0,
+        added_arr: Number(form.added_arr) || 0,
         updated_at: new Date().toISOString(),
       }),
     }))
@@ -356,9 +428,13 @@ export default function App() {
     const now = new Date().toISOString()
     const deal = {
       id: dealId,
+      opportunity_name: dealForm.opportunity_name || `${lead.company || lead.full_name} - New Deal`,
       account_name: dealForm.account_name || lead.company || lead.full_name,
       contact_name: lead.full_name || '',
+      stage: dealForm.stage || 'prospecting',
+      close_date: dealForm.close_date || '',
       new_arr: Number(dealForm.new_arr) || 0,
+      added_arr: Number(dealForm.added_arr) || 0,
       type: dealForm.type || 'new_business',
       country: lead.country || '',
       deal_status: 'open',
@@ -406,7 +482,7 @@ export default function App() {
     else if (statusFilter === 'lost') arr = lostDeals
     return [...arr].sort((a, b) => {
       let av = a[sort.field], bv = b[sort.field]
-      if (sort.field === 'probability' || sort.field === 'new_arr') {
+      if (sort.field === 'probability' || sort.field === 'new_arr' || sort.field === 'added_arr') {
         av = Number(av); bv = Number(bv)
       } else {
         av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase()
@@ -790,8 +866,8 @@ function PipelineTable({ deals, tracks, sort, handleSort, visibleCols, onSelectD
   const tdStyle = { padding: '12px 14px', fontSize: 13, color: '#374151', verticalAlign: 'middle' }
 
   return (
-    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 900 }}>
         <thead>
           <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
             {visibleColumns.map(col => (
@@ -817,10 +893,24 @@ function PipelineTable({ deals, tracks, sort, handleSort, visibleCols, onSelectD
                 onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               >
-                {visibleColumns.map(col => (
+                {visibleColumns.map(col => {
+                  const fc = forecastCat(deal.probability || 0)
+                  const stageObj = DEAL_STAGES.find(s => s.key === deal.stage)
+                  return (
                   <td key={col.key} style={tdStyle}>
-                    {col.key === 'account_name' && <span style={{ fontWeight: 600 }}>{deal.account_name}</span>}
+                    {col.key === 'opportunity_name' && <span style={{ fontWeight: 600, color: '#6366f1' }}>{deal.opportunity_name || deal.account_name}</span>}
+                    {col.key === 'account_name' && <span>{deal.account_name}</span>}
+                    {col.key === 'stage' && (
+                      <span style={{ background: '#f1f5f9', color: '#475569', borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 500 }}>
+                        {stageObj ? stageObj.label : deal.stage || '—'}
+                      </span>
+                    )}
+                    {col.key === 'close_date' && (deal.close_date ? fmtDate(deal.close_date) : '—')}
                     {col.key === 'new_arr' && fmtMoney(deal.new_arr)}
+                    {col.key === 'forecast' && (
+                      <span style={{ color: fc.color, fontWeight: 600, fontSize: 12 }}>{fc.label}</span>
+                    )}
+                    {col.key === 'added_arr' && fmtMoney(deal.added_arr || 0)}
                     {col.key === 'type' && (
                       <span style={{
                         background: deal.type === 'new_business' ? '#eff6ff' : '#fffbeb',
@@ -860,7 +950,8 @@ function PipelineTable({ deals, tracks, sort, handleSort, visibleCols, onSelectD
                     {col.key === 'contact' && (deal.contact_name || '—')}
                     {col.key === 'created' && fmtDate(deal.created_at)}
                   </td>
-                ))}
+                  )
+                })}
               </tr>
             )
           })}
@@ -892,9 +983,13 @@ function TrackDots({ tracks }) {
 
 function DealFormModal({ deal, onSave, onClose }) {
   const [form, setForm] = useState({
+    opportunity_name: deal?.opportunity_name || '',
     account_name: deal?.account_name || '',
     contact_name: deal?.contact_name || '',
+    stage: deal?.stage || 'prospecting',
+    close_date: deal?.close_date || '',
     new_arr: deal?.new_arr || '',
+    added_arr: deal?.added_arr || '',
     type: deal?.type || 'new_business',
     country: deal?.country || '',
     deal_status: deal?.deal_status || 'open',
@@ -911,7 +1006,7 @@ function DealFormModal({ deal, onSave, onClose }) {
 
   function handleSubmit(e) {
     e.preventDefault()
-    if (!form.account_name.trim()) return
+    if (!form.opportunity_name.trim() && !form.account_name.trim()) return
     onSave(form)
   }
 
@@ -946,9 +1041,13 @@ function DealFormModal({ deal, onSave, onClose }) {
         </div>
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            {field('Account Name *', inp('account_name'))}
+            {field('Opportunity Name *', inp('opportunity_name', 'text', 'e.g. BEES (Brasil) - Renewal 2026/27'), true)}
+            {field('Account Name', inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
             {field('Contact Name', inp('contact_name'))}
-            {field('New ARR (USD)', inp('new_arr', 'number'))}
+            {field('Stage', sel('stage', DEAL_STAGES.map(s => ({ value: s.key, label: s.label }))))}
+            {field('Close Date', inp('close_date', 'date'))}
+            {field('Annual Deal Size (USD)', inp('new_arr', 'number'))}
+            {field('Added ARR (USD)', inp('added_arr', 'number'))}
             {field('Type', sel('type', [{ value: 'new_business', label: 'New Business' }, { value: 'upsell', label: 'Upsell' }]))}
             {field('Country', (
               <select value={form.country} onChange={e => set('country', e.target.value)}
@@ -1000,12 +1099,14 @@ function DealDetailPanel({ deal, tracks, scores, onClose, onEdit, onDelete, onWo
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-                <span style={{ fontWeight: 700, fontSize: 18 }}>{deal.account_name}</span>
+                <span style={{ fontWeight: 700, fontSize: 18 }}>{deal.opportunity_name || deal.account_name}</span>
                 <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>{si.label}</span>
               </div>
               <div style={{ fontSize: 13, color: '#64748b' }}>
+                {deal.account_name && <span>{deal.account_name}</span>}
+                {deal.account_name && deal.contact_name && <span> · </span>}
                 {deal.contact_name && <span>{deal.contact_name}</span>}
-                {deal.contact_name && deal.country && <span> · </span>}
+                {(deal.account_name || deal.contact_name) && deal.country && <span> · </span>}
                 {deal.country && <span>{deal.country}</span>}
               </div>
             </div>
@@ -1026,9 +1127,23 @@ function DealDetailPanel({ deal, tracks, scores, onClose, onEdit, onDelete, onWo
         </div>
 
         <div style={{ padding: 24 }}>
+          {/* Stage & Close Date */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+            <MiniCard label="Stage" value={
+              <span style={{ color: '#475569', fontWeight: 600 }}>
+                {(DEAL_STAGES.find(s => s.key === deal.stage) || {}).label || deal.stage || '—'}
+              </span>
+            } />
+            <MiniCard label="Close Date" value={deal.close_date ? fmtDate(deal.close_date) : '—'} />
+          </div>
+
           {/* Metrics row */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
-            <MiniCard label="ARR" value={fmtMoney(deal.new_arr)} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
+            <MiniCard label="Annual Deal Size" value={fmtMoney(deal.new_arr)} />
+            <MiniCard label="Added ARR" value={fmtMoney(deal.added_arr || 0)} />
+            <MiniCard label="Forecast" value={<span style={{ color: fc.color, fontWeight: 600 }}>{fc.label}</span>} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 20 }}>
             <MiniCard
               label="Probability"
               value={<span style={{ color: probColor(prob), fontWeight: 700 }}>{prob}%</span>}
@@ -1036,7 +1151,7 @@ function DealDetailPanel({ deal, tracks, scores, onClose, onEdit, onDelete, onWo
               clickable
             />
             <MiniCard label="Type" value={deal.type === 'new_business' ? 'New Biz' : 'Upsell'} />
-            <MiniCard label="Forecast" value={<span style={{ color: fc.color, fontWeight: 600 }}>{fc.label}</span>} />
+            <MiniCard label="Days in Pipeline" value={daysInPipe != null ? `${daysInPipe}d` : '—'} />
           </div>
 
           {/* Activity */}
