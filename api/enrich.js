@@ -17,9 +17,11 @@ export default async function handler(req, res) {
   try {
     const response = await fetch('https://api.apollo.io/api/v1/people/match', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+      },
       body: JSON.stringify({
-        api_key: apiKey,
         linkedin_url: linkedin_url,
       }),
     })
