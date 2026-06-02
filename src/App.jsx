@@ -226,6 +226,11 @@ export default function App() {
   const [deletingDealId, setDeletingDealId] = useState(null)
   const [showQuota, setShowQuota] = useState(false)
 
+  // Gmail state
+  const [gmailConnected, setGmailConnected] = useState(false)
+  const [gmailEmail, setGmailEmail] = useState('')
+  const [gmailToken, setGmailToken] = useState('')
+
   // Lead state
   const [showNewLead, setShowNewLead] = useState(false)
   const [editLeadData, setEditLeadData] = useState(null)
@@ -292,7 +297,56 @@ export default function App() {
     }
     // Reset column visibility to pick up new columns
     setVisibleCols(defaultCols())
+    // Load Gmail tokens from localStorage
+    const savedGmail = localStorage.getItem('storyly_gmail')
+    if (savedGmail) {
+      try {
+        const g = JSON.parse(savedGmail)
+        if (g.refresh_token) { setGmailToken(g.refresh_token); setGmailEmail(g.email || ''); setGmailConnected(true) }
+      } catch {}
+    }
   }, [])
+
+  // Listen for Gmail OAuth callback
+  useEffect(() => {
+    function handleMessage(event) {
+      if (event.data?.type === 'gmail_auth_success' && event.data.refresh_token) {
+        setGmailToken(event.data.refresh_token)
+        setGmailEmail(event.data.email || '')
+        setGmailConnected(true)
+        localStorage.setItem('storyly_gmail', JSON.stringify({
+          refresh_token: event.data.refresh_token,
+          email: event.data.email || '',
+        }))
+      }
+    }
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [])
+
+  function connectGmail() {
+    window.open('/api/gmail/auth', 'gmail_auth', 'width=500,height=700,left=200,top=100')
+  }
+
+  function disconnectGmail() {
+    setGmailToken(''); setGmailEmail(''); setGmailConnected(false)
+    localStorage.removeItem('storyly_gmail')
+  }
+
+  async function fetchGmailEmails(contactEmail) {
+    if (!gmailToken || !contactEmail) return []
+    try {
+      const res = await fetch('/api/gmail/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: gmailToken, query: contactEmail }),
+      })
+      const data = await res.json()
+      return data.messages || []
+    } catch {
+      return []
+    }
+  }
 
   const saveRef = useRef(null)
   useEffect(() => {
@@ -576,7 +630,70 @@ export default function App() {
           />
         )}
         {activeTab === 'home' && (
-          <PlaceholderTab label="Home" desc="Dashboard coming soon." />
+          <div style={{ maxWidth: 600 }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 24 }}>Settings & Integrations</h2>
+
+            {/* Gmail Integration */}
+            <div style={{ ...cardStyle, marginBottom: 16, padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>📧 Gmail</div>
+                  {gmailConnected ? (
+                    <div style={{ fontSize: 13, color: '#16a34a' }}>
+                      Connected as <strong>{gmailEmail}</strong>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: '#94a3b8' }}>
+                      Connect Gmail to auto-track email activity in your deals
+                    </div>
+                  )}
+                </div>
+                {gmailConnected ? (
+                  <button onClick={disconnectGmail} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', color: '#ef4444' }}>
+                    Disconnect
+                  </button>
+                ) : (
+                  <button onClick={connectGmail} style={{ ...btnPrimary, fontSize: 13, padding: '6px 14px' }}>
+                    Connect Gmail
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Grain Integration (placeholder for Phase 3) */}
+            <div style={{ ...cardStyle, marginBottom: 16, padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>🎥 Grain</div>
+                  <div style={{ fontSize: 13, color: '#94a3b8' }}>
+                    Coming soon — connect Grain for call recordings & transcripts
+                  </div>
+                </div>
+                <button disabled style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', opacity: 0.5 }}>
+                  Coming Soon
+                </button>
+              </div>
+            </div>
+
+            {/* Data management */}
+            <div style={{ ...cardStyle, padding: 20 }}>
+              <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12 }}>💾 Data</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => exportToFile(data)} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px' }}>
+                  Export JSON
+                </button>
+                <label style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+                  Import JSON
+                  <input type="file" accept=".json" style={{ display: 'none' }} onChange={async (e) => {
+                    if (e.target.files[0]) {
+                      const imported = await importFromFile(e.target.files[0])
+                      if (imported) setData(d => ({ ...DEFAULT_DATA, ...imported }))
+                    }
+                  }} />
+                </label>
+              </div>
+            </div>
+          </div>
         )}
         {activeTab === 'prospecting' && (
           <LeadsTab
@@ -605,6 +722,8 @@ export default function App() {
       {selectedDeal && (
         <DealDetailPanel
           deal={selectedDeal}
+          gmailConnected={gmailConnected}
+          onFetchEmails={fetchGmailEmails}
           tracks={data.tracks.filter(t => t.opportunity_id === selectedDeal.id)}
           onClose={() => setSelectedDealId(null)}
           onEdit={() => { setEditDeal(selectedDeal); setSelectedDealId(null) }}
@@ -1115,13 +1234,27 @@ function DealFormModal({ deal, onSave, onClose }) {
 
 // ---- Deal Detail Panel ----
 
-function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onAddActivity }) {
+function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onAddActivity, gmailConnected, onFetchEmails }) {
   const prob = deal.probability || 0
   const fc = forecastCat(prob)
   const si = statusInfo(deal.deal_status)
   const health = dealHealth(deal)
   const daysInPipe = daysAgo(deal.created_at)
   const [newActivity, setNewActivity] = useState({ type: 'note', text: '' })
+  const [gmailEmails, setGmailEmails] = useState([])
+  const [loadingEmails, setLoadingEmails] = useState(false)
+
+  async function handleFetchEmails() {
+    // Try to find a contact email from the deal or associated contacts
+    const contactEmail = deal.contact_email || deal.email || ''
+    if (!contactEmail && !deal.account_name) return
+    setLoadingEmails(true)
+    try {
+      const emails = await onFetchEmails(contactEmail || deal.account_name)
+      setGmailEmails(emails)
+    } catch { }
+    setLoadingEmails(false)
+  }
 
   function handleAddActivity(e) {
     e.preventDefault()
@@ -1251,6 +1384,46 @@ function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLos
           ) : (
             <div style={{ ...cardStyle, padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
               No activities yet. Add notes, log emails, or connect Gmail & Grain for auto-tracking.
+            </div>
+          )}
+
+          {/* Gmail Emails */}
+          {gmailConnected && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <SectionLabel>📧 Gmail History</SectionLabel>
+                <button onClick={handleFetchEmails} disabled={loadingEmails}
+                  style={{ ...btnSecondary, fontSize: 11, padding: '4px 10px' }}>
+                  {loadingEmails ? 'Loading...' : gmailEmails.length > 0 ? 'Refresh' : 'Fetch Emails'}
+                </button>
+              </div>
+              {gmailEmails.length > 0 ? (
+                <div style={{ maxHeight: 200, overflowY: 'auto', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                  {gmailEmails.map((email, i) => {
+                    const isSent = email.labelIds?.includes('SENT')
+                    return (
+                      <div key={email.id} style={{
+                        padding: '8px 12px', borderBottom: i < gmailEmails.length - 1 ? '1px solid #f1f5f9' : 'none',
+                        display: 'flex', gap: 8, alignItems: 'flex-start',
+                      }}>
+                        <span style={{ fontSize: 14, flexShrink: 0 }}>{isSent ? '📤' : '📥'}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {email.subject || '(no subject)'}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {isSent ? `To: ${email.to}` : `From: ${email.from}`} · {email.date ? new Date(email.date).toLocaleDateString() : ''}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : !loadingEmails ? (
+                <div style={{ ...cardStyle, padding: 12, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>
+                  Click "Fetch Emails" to load email history for this deal
+                </div>
+              ) : null}
             </div>
           )}
 
