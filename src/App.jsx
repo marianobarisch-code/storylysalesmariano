@@ -52,10 +52,36 @@ const FLOWLA_OPTIONS = ['None', 'Low', 'High']
 const FLOWLA_KEYS = { 'None': 'none', 'Low': 'low', 'High': 'high' }
 const FLOWLA_LABELS = { none: 'None', low: 'Low', high: 'High' }
 
+const LEAD_STAGES = [
+  { key: 'new',             label: 'New',             color: '#6366f1', bg: '#eef2ff' },
+  { key: 'researching',     label: 'Researching',     color: '#8b5cf6', bg: '#f5f3ff' },
+  { key: 'engaging',        label: 'Engaging',        color: '#3b82f6', bg: '#eff6ff' },
+  { key: 'nurturing',       label: 'Nurturing',       color: '#f59e0b', bg: '#fffbeb' },
+  { key: 'qualified',       label: 'Qualified',       color: '#22c55e', bg: '#f0fdf4' },
+  { key: 'converted',       label: 'Converted',       color: '#16a34a', bg: '#dcfce7' },
+  { key: 'not_interested',  label: 'Not Interested',  color: '#94a3b8', bg: '#f1f5f9' },
+]
+
+const LEAD_SOURCES = [
+  { key: 'outbound', label: 'Outbound',  color: '#3b82f6' },
+  { key: 'inbound',  label: 'Inbound',   color: '#22c55e' },
+  { key: 'referral', label: 'Referral',   color: '#f59e0b' },
+  { key: 'event',    label: 'Event',      color: '#8b5cf6' },
+]
+
+function leadStageInfo(key) {
+  return LEAD_STAGES.find(s => s.key === key) || LEAD_STAGES[0]
+}
+
+function leadSourceInfo(key) {
+  return LEAD_SOURCES.find(s => s.key === key) || LEAD_SOURCES[0]
+}
+
 const DEFAULT_DATA = {
   deals: [],
   scores: {},
   tracks: [],
+  leads: [],
   settings: { quota_target: 0, quota_quarter: 'Q2 2026' },
 }
 
@@ -160,6 +186,15 @@ export default function App() {
   const [showQuota, setShowQuota] = useState(false)
   const [probScorerDealId, setProbScorerDealId] = useState(null)
 
+  // Lead state
+  const [showNewLead, setShowNewLead] = useState(false)
+  const [editLeadData, setEditLeadData] = useState(null)
+  const [selectedLeadId, setSelectedLeadId] = useState(null)
+  const [deletingLeadId, setDeletingLeadId] = useState(null)
+  const [leadStageFilter, setLeadStageFilter] = useState('active')
+  const [leadSort, setLeadSort] = useState({ field: 'created_at', dir: 'desc' })
+  const [convertingLead, setConvertingLead] = useState(null)
+
   useEffect(() => {
     const saved = loadData()
     if (saved) setData(d => ({ ...DEFAULT_DATA, ...saved }))
@@ -262,6 +297,102 @@ export default function App() {
     )
   }
 
+  // ---- Lead Handlers ----
+
+  function addLead(form) {
+    const id = genId()
+    const now = new Date().toISOString()
+    const lead = {
+      id,
+      full_name: form.full_name || '',
+      linkedin_url: form.linkedin_url || '',
+      email: form.email || '',
+      phone: form.phone || '',
+      title: form.title || '',
+      company: form.company || '',
+      industry: form.industry || '',
+      country: form.country || '',
+      source: form.source || 'outbound',
+      stage: form.stage || 'new',
+      last_contact_date: form.last_contact_date || '',
+      last_contact_note: form.last_contact_note || '',
+      next_action: form.next_action || '',
+      next_action_date: form.next_action_date || '',
+      tags: form.tags || '',
+      notes: form.notes || '',
+      deal_id: null,
+      created_at: now,
+      updated_at: now,
+    }
+    setData(d => ({ ...d, leads: [...(d.leads || []), lead] }))
+  }
+
+  function updateLeadFn(id, form) {
+    setData(d => ({
+      ...d,
+      leads: (d.leads || []).map(l => l.id !== id ? l : {
+        ...l, ...form, updated_at: new Date().toISOString(),
+      }),
+    }))
+  }
+
+  function deleteLeadFn(id) {
+    setData(d => ({ ...d, leads: (d.leads || []).filter(l => l.id !== id) }))
+    if (selectedLeadId === id) setSelectedLeadId(null)
+    setDeletingLeadId(null)
+  }
+
+  function updateLeadStage(id, stage) {
+    setData(d => ({
+      ...d,
+      leads: (d.leads || []).map(l => l.id !== id ? l : {
+        ...l, stage, updated_at: new Date().toISOString(),
+      }),
+    }))
+  }
+
+  function convertLeadToDeal(lead, dealForm) {
+    const dealId = genId()
+    const now = new Date().toISOString()
+    const deal = {
+      id: dealId,
+      account_name: dealForm.account_name || lead.company || lead.full_name,
+      contact_name: lead.full_name || '',
+      new_arr: Number(dealForm.new_arr) || 0,
+      type: dealForm.type || 'new_business',
+      country: lead.country || '',
+      deal_status: 'open',
+      probability: 0,
+      last_meeting_date: '',
+      last_update_note: `Converted from lead: ${lead.full_name}`,
+      last_update_date: now.slice(0, 10),
+      service_order_status: 'not_applicable',
+      flowla_engagement: 'none',
+      flowla_url: '',
+      notes: lead.notes || '',
+      created_at: now,
+      updated_at: now,
+    }
+    setData(d => ({
+      ...d,
+      deals: [...d.deals, deal],
+      tracks: [...d.tracks, ...createTrackRows(dealId)],
+      scores: { ...d.scores, [dealId]: defaultScores() },
+      leads: (d.leads || []).map(l => l.id !== lead.id ? l : {
+        ...l, stage: 'converted', deal_id: dealId, updated_at: now,
+      }),
+    }))
+    setConvertingLead(null)
+    setSelectedLeadId(null)
+  }
+
+  function handleLeadSort(field) {
+    setLeadSort(s => s.field === field
+      ? { field, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+      : { field, dir: 'asc' }
+    )
+  }
+
   // ---- Computed ----
 
   const openDeals = data.deals.filter(d => d.deal_status === 'open')
@@ -294,6 +425,24 @@ export default function App() {
   const probScorerDeal = data.deals.find(d => d.id === probScorerDealId) || null
   const deletingDeal   = data.deals.find(d => d.id === deletingDealId) || null
 
+  // Lead computed
+  const allLeads = data.leads || []
+  const activeLeads = allLeads.filter(l => !['converted', 'not_interested'].includes(l.stage))
+  const filteredLeads = (() => {
+    let arr = allLeads
+    if (leadStageFilter === 'active') arr = activeLeads
+    else if (leadStageFilter !== 'all') arr = allLeads.filter(l => l.stage === leadStageFilter)
+    return [...arr].sort((a, b) => {
+      let av = a[leadSort.field], bv = b[leadSort.field]
+      av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase()
+      if (av < bv) return leadSort.dir === 'asc' ? -1 : 1
+      if (av > bv) return leadSort.dir === 'asc' ? 1 : -1
+      return 0
+    })
+  })()
+  const selectedLead = allLeads.find(l => l.id === selectedLeadId) || null
+  const deletingLead = allLeads.find(l => l.id === deletingLeadId) || null
+
   return (
     <div style={{ fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#f8fafc', minHeight: '100vh' }}>
       <Header activeTab={activeTab} setActiveTab={setActiveTab} />
@@ -319,7 +468,13 @@ export default function App() {
           <PlaceholderTab label="Home" desc="Dashboard coming soon." />
         )}
         {activeTab === 'prospecting' && (
-          <PlaceholderTab label="Prospecting" desc="Prospecting tools coming soon." />
+          <LeadsTab
+            leads={allLeads} activeLeads={activeLeads} filteredLeads={filteredLeads}
+            stageFilter={leadStageFilter} setStageFilter={setLeadStageFilter}
+            sort={leadSort} handleSort={handleLeadSort}
+            onNewLead={() => setShowNewLead(true)}
+            onSelectLead={setSelectedLeadId}
+          />
         )}
       </div>
 
@@ -377,6 +532,45 @@ export default function App() {
           onClose={() => setShowQuota(false)}
         />
       )}
+
+      {/* Lead modals */}
+      {showNewLead && (
+        <LeadFormModal
+          onSave={(form) => { addLead(form); setShowNewLead(false) }}
+          onClose={() => setShowNewLead(false)}
+        />
+      )}
+      {editLeadData && (
+        <LeadFormModal
+          lead={editLeadData}
+          onSave={(form) => { updateLeadFn(editLeadData.id, form); setEditLeadData(null) }}
+          onClose={() => setEditLeadData(null)}
+        />
+      )}
+      {selectedLead && (
+        <LeadDetailPanel
+          lead={selectedLead}
+          onClose={() => setSelectedLeadId(null)}
+          onEdit={() => { setEditLeadData(selectedLead); setSelectedLeadId(null) }}
+          onDelete={() => { setDeletingLeadId(selectedLead.id); setSelectedLeadId(null) }}
+          onUpdateStage={(stage) => updateLeadStage(selectedLead.id, stage)}
+          onConvert={() => { setConvertingLead(selectedLead); setSelectedLeadId(null) }}
+        />
+      )}
+      {deletingLead && (
+        <LeadDeleteModal
+          lead={deletingLead}
+          onConfirm={() => deleteLeadFn(deletingLead.id)}
+          onClose={() => setDeletingLeadId(null)}
+        />
+      )}
+      {convertingLead && (
+        <ConvertLeadModal
+          lead={convertingLead}
+          onConvert={(dealForm) => convertLeadToDeal(convertingLead, dealForm)}
+          onClose={() => setConvertingLead(null)}
+        />
+      )}
     </div>
   )
 }
@@ -387,7 +581,7 @@ function Header({ activeTab, setActiveTab }) {
   const tabs = [
     { key: 'home', label: 'Home' },
     { key: 'pipeline', label: 'Pipeline Management' },
-    { key: 'prospecting', label: 'Prospecting' },
+    { key: 'prospecting', label: 'Leads' },
   ]
   return (
     <div style={{ backgroundColor: '#fff', borderBottom: '1px solid #e2e8f0', marginBottom: 24 }}>
@@ -1084,6 +1278,494 @@ function QuotaModal({ settings, onSave, onClose }) {
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
             <button type="submit" style={btnPrimary}>Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ===================================================
+// ============== LEADS COMPONENTS ===================
+// ===================================================
+
+// ---- Leads Tab ----
+
+function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilter, sort, handleSort, onNewLead, onSelectLead }) {
+  const stageCounts = {}
+  LEAD_STAGES.forEach(s => { stageCounts[s.key] = leads.filter(l => l.stage === s.key).length })
+
+  return (
+    <div>
+      {/* Metrics */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 16, marginBottom: 24 }}>
+        <MetricCard title="Total Leads" value={leads.length} sub={`${activeLeads.length} active`} />
+        <MetricCard title="New" value={stageCounts.new || 0} sub="Not contacted" />
+        <MetricCard title="Nurturing" value={(stageCounts.engaging || 0) + (stageCounts.nurturing || 0)} sub="In conversation" />
+        <MetricCard title="Qualified" value={stageCounts.qualified || 0} sub="Ready to convert" />
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12, flexWrap: 'wrap' }}>
+        <LeadStageFilter stageFilter={stageFilter} setStageFilter={setStageFilter} leads={leads} activeLeads={activeLeads} />
+        <button onClick={onNewLead} style={btnPrimary}>+ New Lead</button>
+      </div>
+
+      {/* Table */}
+      <LeadsTable leads={filteredLeads} sort={sort} handleSort={handleSort} onSelectLead={onSelectLead} />
+    </div>
+  )
+}
+
+// ---- Lead Stage Filter ----
+
+function LeadStageFilter({ stageFilter, setStageFilter, leads, activeLeads }) {
+  const opts = [
+    { key: 'active', label: 'Active', count: activeLeads.length },
+    { key: 'all',    label: 'All',    count: leads.length },
+    ...LEAD_STAGES.map(s => ({ key: s.key, label: s.label, count: leads.filter(l => l.stage === s.key).length })),
+  ]
+  return (
+    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+      {opts.slice(0, 6).map(o => (
+        <button key={o.key} onClick={() => setStageFilter(o.key)} style={{
+          background: stageFilter === o.key ? '#6366f1' : '#f1f5f9',
+          color: stageFilter === o.key ? '#fff' : '#64748b',
+          border: 'none', cursor: 'pointer', borderRadius: 6,
+          padding: '6px 12px', fontSize: 12, fontWeight: stageFilter === o.key ? 600 : 400,
+          transition: 'all 0.15s',
+        }}>
+          {o.label} <span style={{ opacity: 0.7 }}>({o.count})</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Leads Table ----
+
+function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
+  if (leads.length === 0) {
+    return (
+      <div style={{ ...cardStyle, textAlign: 'center', padding: 48, color: '#94a3b8' }}>
+        No leads match the current filter. Click + New Lead to add a prospect.
+      </div>
+    )
+  }
+
+  const cols = [
+    { key: 'full_name', label: 'Name' },
+    { key: 'title', label: 'Title' },
+    { key: 'company', label: 'Company' },
+    { key: 'country', label: 'Country' },
+    { key: 'source', label: 'Source' },
+    { key: 'stage', label: 'Stage' },
+    { key: 'next_action_date', label: 'Next Action' },
+  ]
+
+  const thStyle = {
+    padding: '10px 12px', textAlign: 'left', fontSize: 12, fontWeight: 600,
+    color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5,
+    cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', background: '#f8fafc',
+  }
+  const tdStyle = { padding: '12px 12px', fontSize: 13, color: '#374151', verticalAlign: 'middle' }
+
+  return (
+    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+            {cols.map(c => (
+              <th key={c.key} style={thStyle} onClick={() => handleSort(c.key)}>
+                {c.label}
+                {sort.field === c.key
+                  ? <span style={{ color: '#6366f1', marginLeft: 4 }}>{sort.dir === 'asc' ? '↑' : '↓'}</span>
+                  : <span style={{ color: '#cbd5e1', marginLeft: 4 }}>{'↕'}</span>}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {leads.map((lead, i) => {
+            const si = leadStageInfo(lead.stage)
+            const src = leadSourceInfo(lead.source)
+            const nextDays = daysAgo(lead.next_action_date)
+            const overdue = lead.next_action_date && nextDays !== null && nextDays > 0
+            return (
+              <tr key={lead.id} onClick={() => onSelectLead(lead.id)}
+                style={{ borderBottom: i < leads.length - 1 ? '1px solid #f1f5f9' : 'none', cursor: 'pointer', transition: 'background 0.1s' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <td style={tdStyle}>
+                  <div style={{ fontWeight: 600 }}>{lead.full_name || '—'}</div>
+                  {lead.email && <div style={{ fontSize: 11, color: '#94a3b8' }}>{lead.email}</div>}
+                </td>
+                <td style={tdStyle}>{lead.title || '—'}</td>
+                <td style={tdStyle}>{lead.company || '—'}</td>
+                <td style={tdStyle}>{lead.country || '—'}</td>
+                <td style={tdStyle}>
+                  <span style={{ color: src.color, fontSize: 12, fontWeight: 500 }}>{src.label}</span>
+                </td>
+                <td style={tdStyle}>
+                  <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 500 }}>{si.label}</span>
+                </td>
+                <td style={tdStyle}>
+                  {lead.next_action_date ? (
+                    <span style={{ color: overdue ? '#ef4444' : '#374151', fontWeight: overdue ? 600 : 400 }}>
+                      {fmtDate(lead.next_action_date)}
+                      {lead.next_action && <div style={{ fontSize: 11, color: '#94a3b8', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lead.next_action}</div>}
+                    </span>
+                  ) : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ---- Lead Form Modal (with enrichment) ----
+
+function LeadFormModal({ lead, onSave, onClose }) {
+  const [form, setForm] = useState({
+    full_name: lead?.full_name || '',
+    linkedin_url: lead?.linkedin_url || '',
+    email: lead?.email || '',
+    phone: lead?.phone || '',
+    title: lead?.title || '',
+    company: lead?.company || '',
+    industry: lead?.industry || '',
+    country: lead?.country || '',
+    source: lead?.source || 'outbound',
+    stage: lead?.stage || 'new',
+    last_contact_date: lead?.last_contact_date || '',
+    last_contact_note: lead?.last_contact_note || '',
+    next_action: lead?.next_action || '',
+    next_action_date: lead?.next_action_date || '',
+    tags: lead?.tags || '',
+    notes: lead?.notes || '',
+  })
+  const [enriching, setEnriching] = useState(false)
+  const [enrichError, setEnrichError] = useState('')
+
+  function set(key, val) { setForm(f => ({ ...f, [key]: val })) }
+
+  async function handleEnrich() {
+    if (!form.linkedin_url) return
+    setEnriching(true)
+    setEnrichError('')
+    try {
+      const res = await fetch('/api/enrich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ linkedin_url: form.linkedin_url }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setForm(f => ({
+          ...f,
+          full_name: data.full_name || f.full_name,
+          email: data.email || f.email,
+          phone: data.phone || f.phone,
+          title: data.title || f.title,
+          company: data.company || f.company,
+          industry: data.industry || f.industry,
+          country: data.country || f.country,
+        }))
+      } else {
+        setEnrichError(data.error || 'Could not enrich this profile')
+      }
+    } catch {
+      setEnrichError('Enrichment not available. Fill in the fields manually.')
+    }
+    setEnriching(false)
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!form.full_name.trim() && !form.linkedin_url.trim()) return
+    onSave(form)
+  }
+
+  const inp = (key, type = 'text', placeholder = '') => (
+    <input type={type} value={form[key]} placeholder={placeholder}
+      onChange={e => set(key, e.target.value)}
+      style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+  )
+  const field = (label, content, fullWidth = false) => (
+    <div style={{ gridColumn: fullWidth ? '1 / -1' : undefined }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>{label}</label>
+      {content}
+    </div>
+  )
+
+  return (
+    <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{lead ? 'Edit Lead' : 'New Lead'}</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>{'✕'}</button>
+        </div>
+        <form onSubmit={handleSubmit} style={{ padding: 24 }}>
+          {/* LinkedIn URL + Enrich */}
+          <div style={{ marginBottom: 20, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#6366f1', marginBottom: 6 }}>
+              LinkedIn URL — Paste and click Enrich to auto-fill
+            </label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={form.linkedin_url} placeholder="https://linkedin.com/in/..."
+                onChange={e => set('linkedin_url', e.target.value)}
+                style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+              <button type="button" onClick={handleEnrich} disabled={enriching || !form.linkedin_url}
+                style={{ ...btnPrimary, opacity: enriching || !form.linkedin_url ? 0.5 : 1, whiteSpace: 'nowrap' }}>
+                {enriching ? 'Enriching...' : 'Enrich'}
+              </button>
+            </div>
+            {enrichError && <div style={{ marginTop: 6, fontSize: 12, color: '#ef4444' }}>{enrichError}</div>}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            {field('Full Name *', inp('full_name'))}
+            {field('Email', inp('email', 'email'))}
+            {field('Title / Role', inp('title'))}
+            {field('Phone', inp('phone', 'tel'))}
+            {field('Company', inp('company'))}
+            {field('Industry', inp('industry'))}
+            {field('Country', (
+              <select value={form.country} onChange={e => set('country', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">{'—'} Select {'—'}</option>
+                {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            ))}
+            {field('Source', (
+              <select value={form.source} onChange={e => set('source', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                {LEAD_SOURCES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+              </select>
+            ))}
+            {field('Stage', (
+              <select value={form.stage} onChange={e => set('stage', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                {LEAD_STAGES.filter(s => s.key !== 'converted').map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+              </select>
+            ))}
+            {field('Next Action', inp('next_action', 'text', 'e.g. Send intro email'))}
+            {field('Next Action Date', inp('next_action_date', 'date'))}
+            {field('Last Contact Date', inp('last_contact_date', 'date'))}
+            {field('Last Contact Note', inp('last_contact_note'), true)}
+            {field('Tags', inp('tags', 'text', 'e.g. fintech, high-priority'), true)}
+            {field('Notes', (
+              <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
+            ), true)}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
+            <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
+            <button type="submit" style={btnPrimary}>{lead ? 'Save Changes' : 'Add Lead'}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ---- Lead Detail Panel ----
+
+function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onConvert }) {
+  const si = leadStageInfo(lead.stage)
+  const src = leadSourceInfo(lead.source)
+  const daysIn = daysAgo(lead.created_at)
+  const lastContactDays = daysAgo(lead.last_contact_date)
+  const nextDays = daysAgo(lead.next_action_date)
+  const overdue = lead.next_action_date && nextDays !== null && nextDays > 0
+
+  return (
+    <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto' }}>
+        {/* Header */}
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <span style={{ fontWeight: 700, fontSize: 18 }}>{lead.full_name || 'Unknown'}</span>
+                <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>{si.label}</span>
+              </div>
+              <div style={{ fontSize: 13, color: '#64748b' }}>
+                {lead.title && <span>{lead.title}</span>}
+                {lead.title && lead.company && <span> at </span>}
+                {lead.company && <span style={{ fontWeight: 500 }}>{lead.company}</span>}
+              </div>
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8', flexShrink: 0 }}>{'✕'}</button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+            {lead.stage === 'qualified' && (
+              <button onClick={onConvert} style={{ ...btnPrimary, background: '#22c55e', fontSize: 13, padding: '6px 14px' }}>Convert to Deal</button>
+            )}
+            <button onClick={onEdit} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px' }}>Edit</button>
+            <button onClick={onDelete} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', color: '#ef4444' }}>Delete</button>
+            {lead.linkedin_url && (
+              <a href={lead.linkedin_url} target="_blank" rel="noreferrer"
+                style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', textDecoration: 'none', color: '#0077b5', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                onClick={e => e.stopPropagation()}>
+                LinkedIn {'↗'}
+              </a>
+            )}
+          </div>
+        </div>
+
+        <div style={{ padding: 24 }}>
+          {/* Stage selector */}
+          <SectionLabel>Stage</SectionLabel>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 20, flexWrap: 'wrap' }}>
+            {LEAD_STAGES.filter(s => s.key !== 'converted').map(s => (
+              <button key={s.key} onClick={() => onUpdateStage(s.key)} style={{
+                background: lead.stage === s.key ? s.color : '#f1f5f9',
+                color: lead.stage === s.key ? '#fff' : '#64748b',
+                border: 'none', borderRadius: 4, padding: '5px 10px', fontSize: 11, fontWeight: 600,
+                cursor: 'pointer', transition: 'all 0.15s',
+              }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Contact info */}
+          <SectionLabel>Contact</SectionLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+            <MiniCard label="Email" value={lead.email || '—'} />
+            <MiniCard label="Phone" value={lead.phone || '—'} />
+            <MiniCard label="Country" value={lead.country || '—'} />
+            <MiniCard label="Source" value={<span style={{ color: src.color, fontWeight: 600 }}>{src.label}</span>} />
+          </div>
+
+          {/* Company info */}
+          {(lead.company || lead.industry) && (
+            <>
+              <SectionLabel>Company</SectionLabel>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+                <MiniCard label="Company" value={lead.company || '—'} />
+                <MiniCard label="Industry" value={lead.industry || '—'} />
+              </div>
+            </>
+          )}
+
+          {/* Activity */}
+          <SectionLabel>Activity</SectionLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+            <div style={{ ...cardStyle, padding: 12 }}>
+              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>LAST CONTACT</div>
+              {lead.last_contact_date ? (
+                <>
+                  <div style={{ fontSize: 13 }}>{fmtDate(lead.last_contact_date)}</div>
+                  <div style={{ fontSize: 12, color: lastContactDays > 14 ? '#ef4444' : '#94a3b8' }}>{lastContactDays}d ago</div>
+                </>
+              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>{'—'}</div>}
+            </div>
+            <div style={{ ...cardStyle, padding: 12 }}>
+              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>NEXT ACTION</div>
+              {lead.next_action_date ? (
+                <>
+                  <div style={{ fontSize: 13, color: overdue ? '#ef4444' : '#374151', fontWeight: overdue ? 600 : 400 }}>
+                    {fmtDate(lead.next_action_date)} {overdue && '(overdue!)'}
+                  </div>
+                  {lead.next_action && <div style={{ fontSize: 12, color: '#64748b' }}>{lead.next_action}</div>}
+                </>
+              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>{'—'}</div>}
+            </div>
+          </div>
+          {lead.last_contact_note && (
+            <div style={{ ...cardStyle, padding: 12, marginBottom: 20, fontSize: 13, color: '#374151', background: '#f8fafc' }}>
+              {lead.last_contact_note}
+            </div>
+          )}
+
+          {/* Meta */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+            <MiniCard label="In Pipeline" value={daysIn != null ? `${daysIn}d` : '—'} />
+            <MiniCard label="Tags" value={lead.tags || '—'} />
+          </div>
+
+          {/* Notes */}
+          {lead.notes && (
+            <>
+              <SectionLabel>Notes</SectionLabel>
+              <div style={{ ...cardStyle, padding: 12, fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap', background: '#f8fafc' }}>
+                {lead.notes}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Lead Delete Modal ----
+
+function LeadDeleteModal({ lead, onConfirm, onClose }) {
+  return (
+    <div style={overlayStyle}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 400, padding: 28 }}>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 12 }}>Delete Lead</div>
+        <div style={{ fontSize: 14, color: '#374151', marginBottom: 24 }}>
+          Are you sure you want to delete <strong>{lead.full_name}</strong>? This cannot be undone.
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button onClick={onClose} style={btnSecondary}>Cancel</button>
+          <button onClick={onConfirm} style={btnDanger}>Delete</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Convert Lead to Deal Modal ----
+
+function ConvertLeadModal({ lead, onConvert, onClose }) {
+  const [form, setForm] = useState({
+    account_name: lead.company || lead.full_name || '',
+    new_arr: '',
+    type: 'new_business',
+  })
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    onConvert(form)
+  }
+
+  return (
+    <div style={overlayStyle}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 400, padding: 28 }}>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Convert to Deal</div>
+        <div style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>
+          Creating a deal from lead: <strong>{lead.full_name}</strong>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Account Name</label>
+            <input value={form.account_name} onChange={e => setForm(f => ({ ...f, account_name: e.target.value }))}
+              style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Estimated ARR (USD)</label>
+            <input type="number" value={form.new_arr} onChange={e => setForm(f => ({ ...f, new_arr: e.target.value }))} placeholder="e.g. 30000"
+              style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+          </div>
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Type</label>
+            <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+              style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+              <option value="new_business">New Business</option>
+              <option value="upsell">Upsell</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
+            <button type="submit" style={{ ...btnPrimary, background: '#22c55e' }}>Create Deal</button>
           </div>
         </form>
       </div>
