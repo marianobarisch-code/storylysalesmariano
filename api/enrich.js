@@ -28,15 +28,6 @@ export default async function handler(req, res) {
 
     const data = await response.json()
 
-    // Debug: log Apollo's raw response status and keys
-    console.log('Apollo response status:', response.status)
-    console.log('Apollo response keys:', Object.keys(data))
-
-    // If the request param includes debug=true, return the raw response
-    if (req.query && req.query.debug === 'true') {
-      return res.status(200).json({ apollo_status: response.status, apollo_keys: Object.keys(data), has_person: !!data.person, raw_snippet: JSON.stringify(data).substring(0, 500) })
-    }
-
     if (data.person) {
       const p = data.person
       const org = p.organization || {}
