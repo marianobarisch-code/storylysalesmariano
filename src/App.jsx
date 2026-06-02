@@ -17,14 +17,30 @@ const TRACK_STATUSES = [
   { key: 'done',        label: 'Done',        color: '#22c55e' },
 ]
 
-const PROB_COMPONENTS = [
-  { key: 'icp_fit',          label: 'ICP & Use Case Fit',          weight: 0.20, desc: 'Mobile app-centric brand, multi-use case need, CDP in stack, enterprise budget ($30K+ ARR), industry match (retail, fintech, media, telco)' },
-  { key: 'champion_power',   label: 'Champion & Power Access',      weight: 0.20, desc: 'Internal advocate + access to economic buyer. #1 predictor of deal closure.' },
-  { key: 'pain_urgency',     label: 'Pain & Compelling Event',      weight: 0.15, desc: 'Documented business pain + date-driven urgency (app relaunch, competitor churn, CMO mandate)' },
-  { key: 'budget_eb',        label: 'Budget & Economic Buyer',      weight: 0.15, desc: 'Budget allocated, EB confirmed amount, next cycle planned' },
-  { key: 'decision_process', label: 'Decision Process & Timeline',  weight: 0.15, desc: 'Mutual close plan, procurement engaged, legal/security review started' },
-  { key: 'competitive_pos',  label: 'Competitive Position',         weight: 0.15, desc: 'POC won, recommended vendor, no major objections' },
-]
+// Stage → auto-probability mapping
+const STAGE_PROBABILITY = {
+  prospecting: 10, qualification: 20, needs_analysis: 30,
+  sales_call_completed: 40, technical_alignment: 50,
+  proposal: 70, contract_negotiation: 80,
+}
+
+// Deal Health thresholds (days since last activity)
+const HEALTH_THRESHOLDS = { green: 7, yellow: 14, red: 30 }
+
+function dealHealth(deal) {
+  const days = daysAgo(deal.last_update_date || deal.updated_at)
+  const hasNextStep = !!(deal.next_step && deal.next_step.trim())
+  const nextStepOverdue = deal.next_step_date && new Date(deal.next_step_date) < new Date()
+
+  if (nextStepOverdue) return { label: 'Overdue', color: '#ef4444', bg: '#fef2f2', icon: '⚠️', days }
+  if (days == null || days <= HEALTH_THRESHOLDS.green) {
+    if (hasNextStep) return { label: 'On Track', color: '#16a34a', bg: '#f0fdf4', icon: '🟢', days }
+    return { label: 'Active', color: '#22c55e', bg: '#f0fdf4', icon: '🟢', days }
+  }
+  if (days <= HEALTH_THRESHOLDS.yellow) return { label: 'Needs Attention', color: '#f59e0b', bg: '#fffbeb', icon: '🟡', days }
+  if (days <= HEALTH_THRESHOLDS.red) return { label: 'At Risk', color: '#ef4444', bg: '#fef2f2', icon: '🔴', days }
+  return { label: 'Stale', color: '#64748b', bg: '#f1f5f9', icon: '⚫', days }
+}
 
 const COLUMNS_CONFIG = [
   { key: 'opportunity_name', label: 'Opportunity',   defaultVisible: true },
@@ -34,8 +50,9 @@ const COLUMNS_CONFIG = [
   { key: 'new_arr',         label: 'Annual Deal Size', defaultVisible: true },
   { key: 'forecast',        label: 'Forecast',       defaultVisible: true },
   { key: 'added_arr',       label: 'Added ARR',      defaultVisible: true },
-  { key: 'probability',     label: 'Probability',    defaultVisible: true },
-  { key: 'status',          label: 'Status',         defaultVisible: true },
+  { key: 'health',          label: 'Health',         defaultVisible: true },
+  { key: 'probability',     label: 'Probability',    defaultVisible: false },
+  { key: 'status',          label: 'Status',         defaultVisible: false },
   { key: 'type',            label: 'Type',           defaultVisible: false },
   { key: 'country',         label: 'Country',        defaultVisible: false },
   { key: 'tracks',          label: 'Tracks',         defaultVisible: false },
@@ -129,9 +146,8 @@ function daysAgo(dateStr) {
   return Math.floor((Date.now() - new Date(dateStr)) / 86400000)
 }
 
-function calcProb(scores) {
-  if (!scores) return 0
-  return Math.round(PROB_COMPONENTS.reduce((s, c) => s + (scores[c.key] || 0) * c.weight, 0))
+function calcProbFromStage(stage) {
+  return STAGE_PROBABILITY[stage] || 0
 }
 
 function probColor(p) {
@@ -165,7 +181,7 @@ function createTrackRows(dealId) {
 }
 
 function defaultScores() {
-  return Object.fromEntries(PROB_COMPONENTS.map(c => [c.key, 0]))
+  return {}
 }
 
 function defaultCols() {
@@ -209,7 +225,6 @@ export default function App() {
   const [selectedDealId, setSelectedDealId] = useState(null)
   const [deletingDealId, setDeletingDealId] = useState(null)
   const [showQuota, setShowQuota] = useState(false)
-  const [probScorerDealId, setProbScorerDealId] = useState(null)
 
   // Lead state
   const [showNewLead, setShowNewLead] = useState(false)
@@ -224,6 +239,16 @@ export default function App() {
     const saved = loadData()
     if (saved) {
       let merged = { ...DEFAULT_DATA, ...saved }
+      // Migrate: auto-calc probability from stage for existing deals missing it
+      if (merged.deals && merged.deals.length > 0) {
+        merged.deals = merged.deals.map(d => ({
+          ...d,
+          probability: (d.probability && d.probability > 0) ? d.probability : calcProbFromStage(d.stage || 'prospecting'),
+          activities: d.activities || [],
+          next_step: d.next_step || '',
+          next_step_date: d.next_step_date || '',
+        }))
+      }
       // Seed pipeline deals if empty
       if (!merged.deals || merged.deals.length === 0) {
         const now = new Date().toISOString()
@@ -233,7 +258,8 @@ export default function App() {
         SEED_DEALS.forEach(seed => {
           const id = genId()
           seededDeals.push({
-            id, ...seed, contact_name: '', deal_status: 'open', probability: 0,
+            id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
+            next_step: '', next_step_date: '', activities: [],
             last_meeting_date: '', last_update_note: '', last_update_date: '',
             service_order_status: 'not_applicable', flowla_engagement: 'none',
             flowla_url: '', notes: '', created_at: now, updated_at: now,
@@ -253,7 +279,8 @@ export default function App() {
       SEED_DEALS.forEach(seed => {
         const id = genId()
         seededDeals.push({
-          id, ...seed, contact_name: '', deal_status: 'open', probability: 0,
+          id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
+          next_step: '', next_step_date: '', activities: [],
           last_meeting_date: '', last_update_note: '', last_update_date: '',
           service_order_status: 'not_applicable', flowla_engagement: 'none',
           flowla_url: '', notes: '', created_at: now, updated_at: now,
@@ -291,7 +318,10 @@ export default function App() {
       type: form.type || 'new_business',
       country: form.country || '',
       deal_status: form.deal_status || 'open',
-      probability: 0,
+      probability: calcProbFromStage(form.stage || 'prospecting'),
+      next_step: form.next_step || '',
+      next_step_date: form.next_step_date || '',
+      activities: [],
       last_meeting_date: form.last_meeting_date || '',
       last_update_note: form.last_update_note || '',
       last_update_date: form.last_update_date || '',
@@ -317,7 +347,21 @@ export default function App() {
         ...deal, ...form,
         new_arr: Number(form.new_arr) || 0,
         added_arr: Number(form.added_arr) || 0,
+        probability: form.stage ? calcProbFromStage(form.stage) : deal.probability,
         updated_at: new Date().toISOString(),
+      }),
+    }))
+  }
+
+  function addActivity(dealId, activity) {
+    const now = new Date().toISOString()
+    setData(d => ({
+      ...d,
+      deals: d.deals.map(deal => deal.id !== dealId ? deal : {
+        ...deal,
+        activities: [...(deal.activities || []), { id: genId(), date: now, ...activity }],
+        last_update_date: now.slice(0, 10),
+        updated_at: now,
       }),
     }))
   }
@@ -347,17 +391,6 @@ export default function App() {
       ...d,
       tracks: d.tracks.map(t => t.id !== trackId ? t : {
         ...t, status, updated_at: new Date().toISOString(),
-      }),
-    }))
-  }
-
-  function saveScores(dealId, scores) {
-    const prob = calcProb(scores)
-    setData(d => ({
-      ...d,
-      scores: { ...d.scores, [dealId]: scores },
-      deals: d.deals.map(deal => deal.id !== dealId ? deal : {
-        ...deal, probability: prob, updated_at: new Date().toISOString(),
       }),
     }))
   }
@@ -438,7 +471,10 @@ export default function App() {
       type: dealForm.type || 'new_business',
       country: lead.country || '',
       deal_status: 'open',
-      probability: 0,
+      probability: calcProbFromStage(dealForm.stage || 'prospecting'),
+      next_step: '',
+      next_step_date: '',
+      activities: [{ id: genId(), type: 'note', date: now, text: `Lead converted: ${lead.full_name}` }],
       last_meeting_date: '',
       last_update_note: `Converted from lead: ${lead.full_name}`,
       last_update_date: now.slice(0, 10),
@@ -498,7 +534,6 @@ export default function App() {
   const closedWonTotal   = wonDeals.reduce((s, d) => s + d.new_arr, 0)
 
   const selectedDeal   = data.deals.find(d => d.id === selectedDealId) || null
-  const probScorerDeal = data.deals.find(d => d.id === probScorerDealId) || null
   const deletingDeal   = data.deals.find(d => d.id === deletingDealId) || null
 
   // Lead computed
@@ -571,7 +606,6 @@ export default function App() {
         <DealDetailPanel
           deal={selectedDeal}
           tracks={data.tracks.filter(t => t.opportunity_id === selectedDeal.id)}
-          scores={data.scores[selectedDeal.id]}
           onClose={() => setSelectedDealId(null)}
           onEdit={() => { setEditDeal(selectedDeal); setSelectedDealId(null) }}
           onDelete={() => { setDeletingDealId(selectedDeal.id); setSelectedDealId(null) }}
@@ -579,19 +613,7 @@ export default function App() {
           onLost={() => setDealStatus(selectedDeal.id, 'closed_lost')}
           onReopen={() => setDealStatus(selectedDeal.id, 'open')}
           onUpdateTrack={updateTrack}
-          onOpenProbScorer={() => { setProbScorerDealId(selectedDeal.id); setSelectedDealId(null) }}
-        />
-      )}
-      {probScorerDeal && (
-        <ProbabilityScorerModal
-          deal={probScorerDeal}
-          scores={data.scores[probScorerDeal.id] || defaultScores()}
-          onSave={(scores) => {
-            saveScores(probScorerDeal.id, scores)
-            setProbScorerDealId(null)
-            setSelectedDealId(probScorerDeal.id)
-          }}
-          onClose={() => { setProbScorerDealId(null); setSelectedDealId(probScorerDeal.id) }}
+          onAddActivity={(activity) => addActivity(selectedDeal.id, activity)}
         />
       )}
       {deletingDeal && (
@@ -911,6 +933,12 @@ function PipelineTable({ deals, tracks, sort, handleSort, visibleCols, onSelectD
                       <span style={{ color: fc.color, fontWeight: 600, fontSize: 12 }}>{fc.label}</span>
                     )}
                     {col.key === 'added_arr' && fmtMoney(deal.added_arr || 0)}
+                    {col.key === 'health' && (() => {
+                      const h = dealHealth(deal)
+                      return <span style={{ background: h.bg, color: h.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>
+                        {h.icon} {h.label}
+                      </span>
+                    })()}
                     {col.key === 'type' && (
                       <span style={{
                         background: deal.type === 'new_business' ? '#eff6ff' : '#fffbeb',
@@ -999,6 +1027,8 @@ function DealFormModal({ deal, onSave, onClose }) {
     service_order_status: deal?.service_order_status || 'not_applicable',
     flowla_engagement: deal?.flowla_engagement || 'none',
     flowla_url: deal?.flowla_url || '',
+    next_step: deal?.next_step || '',
+    next_step_date: deal?.next_step_date || '',
     notes: deal?.notes || '',
   })
 
@@ -1066,6 +1096,8 @@ function DealFormModal({ deal, onSave, onClose }) {
             {field('Service Order', sel('service_order_status', SERVICE_ORDER_OPTIONS.map(o => ({ value: SERVICE_ORDER_KEYS[o], label: o }))))}
             {field('Flowla Engagement', sel('flowla_engagement', FLOWLA_OPTIONS.map(o => ({ value: FLOWLA_KEYS[o], label: o }))))}
             {field('Flowla URL', inp('flowla_url', 'text', 'https://'), true)}
+            {field('Next Step', inp('next_step', 'text', 'e.g. Send proposal, Schedule tech call...'))}
+            {field('Next Step Date', inp('next_step_date', 'date'))}
             {field('Notes', (
               <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3}
                 style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
@@ -1083,24 +1115,38 @@ function DealFormModal({ deal, onSave, onClose }) {
 
 // ---- Deal Detail Panel ----
 
-function DealDetailPanel({ deal, tracks, scores, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onOpenProbScorer }) {
+function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onAddActivity }) {
   const prob = deal.probability || 0
   const fc = forecastCat(prob)
   const si = statusInfo(deal.deal_status)
+  const health = dealHealth(deal)
   const daysInPipe = daysAgo(deal.created_at)
-  const lastMeetDays = daysAgo(deal.last_meeting_date)
-  const lastUpdateDays = daysAgo(deal.last_update_date)
+  const [newActivity, setNewActivity] = useState({ type: 'note', text: '' })
+
+  function handleAddActivity(e) {
+    e.preventDefault()
+    if (!newActivity.text.trim()) return
+    onAddActivity(newActivity)
+    setNewActivity({ type: 'note', text: '' })
+  }
+
+  const activities = [...(deal.activities || [])].sort((a, b) => new Date(b.date) - new Date(a.date))
+  const actIcons = { note: '📝', email_sent: '📤', email_received: '📥', call: '📞', meeting: '🤝', whatsapp: '💬', grain: '🎥' }
+  const actLabels = { note: 'Note', email_sent: 'Email Sent', email_received: 'Email Received', call: 'Call', meeting: 'Meeting', whatsapp: 'WhatsApp', grain: 'Grain Recording' }
 
   return (
     <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 600, maxHeight: '90vh', overflow: 'auto' }}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
         {/* Header */}
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 700, fontSize: 18 }}>{deal.opportunity_name || deal.account_name}</span>
                 <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>{si.label}</span>
+                <span style={{ background: health.bg, color: health.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>
+                  {health.icon} {health.label}
+                </span>
               </div>
               <div style={{ fontSize: 13, color: '#64748b' }}>
                 {deal.account_name && <span>{deal.account_name}</span>}
@@ -1127,90 +1173,111 @@ function DealDetailPanel({ deal, tracks, scores, onClose, onEdit, onDelete, onWo
         </div>
 
         <div style={{ padding: 24 }}>
+          {/* Health + Next Step banner */}
+          {deal.next_step && (
+            <div style={{
+              background: health.bg, border: `1px solid ${health.color}33`, borderRadius: 8, padding: 12, marginBottom: 16,
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: health.color, marginBottom: 2 }}>NEXT STEP</div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: '#0f172a' }}>{deal.next_step}</div>
+              </div>
+              {deal.next_step_date && (
+                <div style={{ fontSize: 12, color: health.color, fontWeight: 600, textAlign: 'right' }}>
+                  {fmtDate(deal.next_step_date)}
+                  {new Date(deal.next_step_date) < new Date() && <div style={{ fontSize: 11, color: '#ef4444' }}>OVERDUE</div>}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Stage & Close Date */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
             <MiniCard label="Stage" value={
-              <span style={{ color: '#475569', fontWeight: 600 }}>
+              <span style={{ color: '#475569', fontWeight: 600, fontSize: 12 }}>
                 {(DEAL_STAGES.find(s => s.key === deal.stage) || {}).label || deal.stage || '—'}
               </span>
             } />
             <MiniCard label="Close Date" value={deal.close_date ? fmtDate(deal.close_date) : '—'} />
+            <MiniCard label="Probability" value={<span style={{ color: probColor(prob), fontWeight: 700 }}>{prob}%</span>} />
           </div>
 
-          {/* Metrics row */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
-            <MiniCard label="Annual Deal Size" value={fmtMoney(deal.new_arr)} />
+          {/* Metrics */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+            <MiniCard label="Deal Size" value={fmtMoney(deal.new_arr)} />
             <MiniCard label="Added ARR" value={fmtMoney(deal.added_arr || 0)} />
             <MiniCard label="Forecast" value={<span style={{ color: fc.color, fontWeight: 600 }}>{fc.label}</span>} />
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 20 }}>
-            <MiniCard
-              label="Probability"
-              value={<span style={{ color: probColor(prob), fontWeight: 700 }}>{prob}%</span>}
-              onClick={onOpenProbScorer}
-              clickable
-            />
-            <MiniCard label="Type" value={deal.type === 'new_business' ? 'New Biz' : 'Upsell'} />
-            <MiniCard label="Days in Pipeline" value={daysInPipe != null ? `${daysInPipe}d` : '—'} />
+            <MiniCard label="In Pipeline" value={daysInPipe != null ? `${daysInPipe}d` : '—'} />
           </div>
 
-          {/* Activity */}
-          <SectionLabel>Activity</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-            <div style={{ ...cardStyle, padding: 12 }}>
-              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>LAST MEETING</div>
-              {deal.last_meeting_date ? (
-                <>
-                  <div style={{ fontSize: 13 }}>{fmtDate(deal.last_meeting_date)}</div>
-                  <div style={{ fontSize: 12, color: lastMeetDays > 14 ? '#ef4444' : '#94a3b8' }}>{lastMeetDays}d ago</div>
-                </>
-              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>—</div>}
+          {/* Activity Timeline */}
+          <SectionLabel>Activity Timeline</SectionLabel>
+          <form onSubmit={handleAddActivity} style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <select value={newActivity.type} onChange={e => setNewActivity(a => ({ ...a, type: e.target.value }))}
+              style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, background: '#fff', minWidth: 100 }}>
+              <option value="note">📝 Note</option>
+              <option value="email_sent">📤 Email Sent</option>
+              <option value="email_received">📥 Email Received</option>
+              <option value="call">📞 Call</option>
+              <option value="meeting">🤝 Meeting</option>
+              <option value="whatsapp">💬 WhatsApp</option>
+            </select>
+            <input
+              value={newActivity.text} onChange={e => setNewActivity(a => ({ ...a, text: e.target.value }))}
+              placeholder="What happened?"
+              style={{ flex: 1, padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }}
+            />
+            <button type="submit" style={{ ...btnPrimary, padding: '6px 14px', fontSize: 13 }}>Add</button>
+          </form>
+
+          {activities.length > 0 ? (
+            <div style={{ maxHeight: 250, overflowY: 'auto', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+              {activities.map((act, i) => (
+                <div key={act.id || i} style={{
+                  padding: '10px 14px', borderBottom: i < activities.length - 1 ? '1px solid #f1f5f9' : 'none',
+                  display: 'flex', gap: 10, alignItems: 'flex-start',
+                }}>
+                  <span style={{ fontSize: 16, flexShrink: 0 }}>{actIcons[act.type] || '📝'}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: '#0f172a' }}>{act.text}</div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                      {actLabels[act.type] || act.type} · {fmtDate(act.date)}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-            <div style={{ ...cardStyle, padding: 12 }}>
-              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>LAST UPDATE</div>
-              {deal.last_update_date ? (
-                <>
-                  <div style={{ fontSize: 13 }}>{fmtDate(deal.last_update_date)}</div>
-                  <div style={{ fontSize: 12, color: lastUpdateDays > 7 ? '#f59e0b' : '#94a3b8' }}>{lastUpdateDays}d ago</div>
-                </>
-              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>—</div>}
-            </div>
-          </div>
-          {deal.last_update_note && (
-            <div style={{ ...cardStyle, padding: 12, marginBottom: 20, fontSize: 13, color: '#374151', background: '#f8fafc' }}>
-              {deal.last_update_note}
+          ) : (
+            <div style={{ ...cardStyle, padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+              No activities yet. Add notes, log emails, or connect Gmail & Grain for auto-tracking.
             </div>
           )}
+
+          {/* Process Tracks */}
+          <div style={{ marginTop: 20 }}>
+            <SectionLabel>Process Tracks</SectionLabel>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+              {TRACKS_CONFIG.map(tc => {
+                const t = tracks.find(x => x.track_name === tc.key)
+                return <TrackRow key={tc.key} trackConfig={tc} track={t} onUpdateTrack={onUpdateTrack} />
+              })}
+            </div>
+          </div>
 
           {/* Status fields */}
           <SectionLabel>Status</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 20 }}>
             <MiniCard label="Service Order" value={SERVICE_ORDER_LABELS[deal.service_order_status] || '—'} />
-            <MiniCard
-              label="Flowla"
-              value={
-                <span>
-                  {FLOWLA_LABELS[deal.flowla_engagement] || '—'}
-                  {deal.flowla_url && (
-                    <a href={deal.flowla_url} target="_blank" rel="noreferrer" style={{ marginLeft: 6, fontSize: 11, color: '#6366f1' }} onClick={e => e.stopPropagation()}>
-                      ↗ Open
-                    </a>
-                  )}
-                </span>
-              }
-            />
-            <MiniCard label="In Pipeline" value={daysInPipe != null ? `${daysInPipe}d` : '—'} />
-          </div>
-
-          {/* Process Tracks */}
-          <SectionLabel>Process Tracks</SectionLabel>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-            {TRACKS_CONFIG.map(tc => {
-              const t = tracks.find(x => x.track_name === tc.key)
-              return (
-                <TrackRow key={tc.key} trackConfig={tc} track={t} onUpdateTrack={onUpdateTrack} />
-              )
-            })}
+            <MiniCard label="Flowla" value={
+              <span>
+                {FLOWLA_LABELS[deal.flowla_engagement] || '—'}
+                {deal.flowla_url && (
+                  <a href={deal.flowla_url} target="_blank" rel="noreferrer" style={{ marginLeft: 6, fontSize: 11, color: '#6366f1' }} onClick={e => e.stopPropagation()}>↗ Open</a>
+                )}
+              </span>
+            } />
+            <MiniCard label="Type" value={deal.type === 'new_business' ? 'New Biz' : 'Upsell'} />
           </div>
 
           {/* Notes */}
@@ -1277,63 +1344,7 @@ function TrackRow({ trackConfig, track, onUpdateTrack }) {
   )
 }
 
-// ---- Probability Scorer Modal ----
-
-function ProbabilityScorerModal({ deal, scores, onSave, onClose }) {
-  const [local, setLocal] = useState({ ...defaultScores(), ...scores })
-  const prob = calcProb(local)
-  const fc = forecastCat(prob)
-
-  function setScore(key, val) { setLocal(s => ({ ...s, [key]: Number(val) })) }
-
-  return (
-    <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 540, maxHeight: '90vh', overflow: 'auto' }}>
-        <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 16 }}>Probability Scorer</div>
-            <div style={{ fontSize: 12, color: '#64748b' }}>{deal.account_name}</div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>✕</button>
-        </div>
-
-        <div style={{ padding: 24 }}>
-          {PROB_COMPONENTS.map(c => (
-            <div key={c.key} style={{ marginBottom: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <div>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{c.label}</span>
-                  <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 6 }}>{Math.round(c.weight * 100)}%</span>
-                </div>
-                <span style={{ fontSize: 16, fontWeight: 700, color: probColor(local[c.key] || 0) }}>
-                  {local[c.key] || 0}
-                </span>
-              </div>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>{c.desc}</div>
-              <input
-                type="range" min={0} max={100} step={5}
-                value={local[c.key] || 0}
-                onChange={e => setScore(c.key, e.target.value)}
-                style={{ width: '100%', accentColor: '#6366f1' }}
-              />
-            </div>
-          ))}
-        </div>
-
-        <div style={{ padding: '16px 24px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 32, fontWeight: 800, color: probColor(prob) }}>{prob}%</span>
-            <span style={{ background: fc.color + '22', color: fc.color, borderRadius: 4, padding: '3px 10px', fontSize: 13, fontWeight: 600 }}>{fc.label}</span>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={onClose} style={btnSecondary}>Cancel</button>
-            <button onClick={() => onSave(local)} style={btnPrimary}>Save</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
+// (ProbabilityScorerModal removed — probability now auto-calculated from stage)
 
 // ---- Delete Confirm Modal ----
 
