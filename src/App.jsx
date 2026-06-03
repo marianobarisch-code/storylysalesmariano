@@ -248,13 +248,35 @@ export default function App() {
       if (merged.deals && merged.deals.length > 0) {
         merged.deals = merged.deals.map(d => ({
           ...d,
+          opportunity_name: d.opportunity_name || d.account_name || '',
+          stage: d.stage || 'prospecting',
+          close_date: d.close_date || '',
+          added_arr: d.added_arr || 0,
           probability: (d.probability && d.probability > 0) ? d.probability : calcProbFromStage(d.stage || 'prospecting'),
           activities: d.activities || [],
           next_step: d.next_step || '',
           next_step_date: d.next_step_date || '',
         }))
       }
-      // Seed pipeline deals if empty
+      // One-time merge: add seed deals that don't exist yet (by opportunity_name)
+      const existingNames = new Set((merged.deals || []).map(d => d.opportunity_name || d.account_name))
+      const missingSeedDeals = SEED_DEALS.filter(s => !existingNames.has(s.opportunity_name))
+      if (missingSeedDeals.length > 0) {
+        const now = new Date().toISOString()
+        missingSeedDeals.forEach(seed => {
+          const id = genId()
+          merged.deals.push({
+            id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
+            next_step: '', next_step_date: '', activities: [],
+            last_meeting_date: '', last_update_note: '', last_update_date: '',
+            service_order_status: 'not_applicable', flowla_engagement: 'none',
+            flowla_url: '', notes: '', created_at: now, updated_at: now,
+          })
+          merged.tracks = [...(merged.tracks || []), ...createTrackRows(id)]
+          merged.scores = { ...(merged.scores || {}), [id]: defaultScores() }
+        })
+      }
+      // Seed pipeline deals if totally empty
       if (!merged.deals || merged.deals.length === 0) {
         const now = new Date().toISOString()
         const seededDeals = []
