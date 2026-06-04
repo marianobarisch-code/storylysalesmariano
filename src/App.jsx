@@ -265,6 +265,8 @@ export default function App() {
   const [leadStageFilter, setLeadStageFilter] = useState('active')
   const [leadSort, setLeadSort] = useState({ field: 'created_at', dir: 'desc' })
   const [convertingLead, setConvertingLead] = useState(null)
+  const [newLeadPrefill, setNewLeadPrefill] = useState(null)
+  const [newDealPrefill, setNewDealPrefill] = useState(null)
 
   useEffect(() => {
     const saved = loadData()
@@ -347,7 +349,8 @@ export default function App() {
     // This is now a function that works on whatever data we're about to setData with
     function migrateAccounts(d) {
       if (!d.accounts) d.accounts = []
-      if (d.accounts.length > 0) return d // already migrated
+      if (!d.settings) d.settings = {}
+      if (d.settings._accounts_migrated) return d // already migrated
       const now = new Date().toISOString()
       const accountMap = new Map() // name → account
       // Create accounts from deals
@@ -379,6 +382,7 @@ export default function App() {
         if (name && accountMap.has(name)) lead.account_id = accountMap.get(name).id
       })
       d.accounts = [...accountMap.values()]
+      d.settings._accounts_migrated = true
       return d
     }
 
@@ -654,6 +658,7 @@ export default function App() {
     const deal = {
       id: dealId,
       opportunity_name: dealForm.opportunity_name || `${lead.company || lead.full_name} - New Deal`,
+      account_id: lead.account_id || '',
       account_name: dealForm.account_name || lead.company || lead.full_name,
       contact_name: lead.full_name || '',
       stage: dealForm.stage || 'prospecting',
@@ -867,6 +872,7 @@ export default function App() {
                   accounts={prospectingAccounts}
                   deals={data.deals}
                   leads={data.leads || []}
+                  leadsCount={activeLeads.length}
                   onNewAccount={() => setShowNewAccount(true)}
                   onSelectAccount={setSelectedAccountId}
                 />
@@ -888,13 +894,16 @@ export default function App() {
 
       {showNewDeal && (
         <DealFormModal
-          onSave={(form) => { addDeal(form); setShowNewDeal(false) }}
-          onClose={() => setShowNewDeal(false)}
+          deal={newDealPrefill}
+          accounts={data.accounts || []}
+          onSave={(form) => { addDeal(form); setShowNewDeal(false); setNewDealPrefill(null) }}
+          onClose={() => { setShowNewDeal(false); setNewDealPrefill(null) }}
         />
       )}
       {editDeal && (
         <DealFormModal
           deal={editDeal}
+          accounts={data.accounts || []}
           onSave={(form) => { updateDeal(editDeal.id, form); setEditDeal(null) }}
           onClose={() => setEditDeal(null)}
         />
@@ -933,13 +942,16 @@ export default function App() {
       {/* Lead modals */}
       {showNewLead && (
         <LeadFormModal
-          onSave={(form) => { addLead(form); setShowNewLead(false) }}
-          onClose={() => setShowNewLead(false)}
+          lead={newLeadPrefill}
+          accounts={data.accounts || []}
+          onSave={(form) => { addLead(form); setShowNewLead(false); setNewLeadPrefill(null) }}
+          onClose={() => { setShowNewLead(false); setNewLeadPrefill(null) }}
         />
       )}
       {editLeadData && (
         <LeadFormModal
           lead={editLeadData}
+          accounts={data.accounts || []}
           onSave={(form) => { updateLeadFn(editLeadData.id, form); setEditLeadData(null) }}
           onClose={() => setEditLeadData(null)}
         />
@@ -994,25 +1006,22 @@ export default function App() {
             onClose={() => setSelectedAccountId(null)}
             onEdit={() => { setEditAccount(acct); setSelectedAccountId(null) }}
             onDelete={() => { deleteAccount(acct.id); setSelectedAccountId(null) }}
-            onAddLead={() => { setShowNewLead(true) }}
+            onAddLead={() => {
+              setNewLeadPrefill({ account_id: acct.id, company: acct.name, country: acct.country || '' })
+              setShowNewLead(true)
+              setSelectedAccountId(null)
+            }}
             onSelectDeal={id => { setSelectedAccountId(null); setSelectedDealId(id) }}
             onSelectLead={id => { setSelectedAccountId(null); setSelectedLeadId(id) }}
             onConvertToOpportunity={() => {
-              // Pre-fill deal form with account data and create deal
-              const dealForm = {
+              setNewDealPrefill({
+                account_id: acct.id, account_name: acct.name,
                 opportunity_name: `${acct.name} - New Deal`,
-                account_id: acct.id,
-                account_name: acct.name,
-                country: acct.country || '',
-                type: 'new_business',
-                stage: 'prospecting',
-              }
-              addDeal(dealForm)
-              // Update account status to engaged
+                country: acct.country || '', type: 'new_business',
+              })
+              setShowNewDeal(true)
               updateAccount(acct.id, { status: 'engaged' })
               setSelectedAccountId(null)
-              // Switch to Pipeline tab to show the new deal
-              setActiveTab('pipeline')
             }}
           />
         )
@@ -1357,9 +1366,10 @@ function TrackDots({ tracks }) {
 
 // ---- Deal Form Modal ----
 
-function DealFormModal({ deal, onSave, onClose }) {
+function DealFormModal({ deal, accounts = [], onSave, onClose }) {
   const [form, setForm] = useState({
     opportunity_name: deal?.opportunity_name || '',
+    account_id: deal?.account_id || '',
     account_name: deal?.account_name || '',
     contact_name: deal?.contact_name || '',
     stage: deal?.stage || 'prospecting',
@@ -1414,13 +1424,24 @@ function DealFormModal({ deal, onSave, onClose }) {
     <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
       <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontWeight: 700, fontSize: 16 }}>{deal ? 'Edit Deal' : 'New Deal'}</div>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{deal?.id ? 'Edit Deal' : 'New Deal'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>✕</button>
         </div>
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             {field('Opportunity Name *', inp('opportunity_name', 'text', 'e.g. BEES (Brasil) - Renewal 2026/27'), true)}
-            {field('Account Name', inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
+            {field('Account', accounts.length > 0 ? (
+              <select value={form.account_id} onChange={e => {
+                const acct = accounts.find(a => a.id === e.target.value)
+                set('account_id', e.target.value)
+                if (acct) set('account_name', acct.name)
+              }}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">— Select or type below —</option>
+                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            ) : inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
+            {form.account_id ? null : field('Account Name', inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
             {field('Contact Name', inp('contact_name'))}
             {field('Stage', sel('stage', DEAL_STAGES.map(s => ({ value: s.key, label: s.label }))))}
             {field('Close Date', inp('close_date', 'date'))}
@@ -1453,7 +1474,7 @@ function DealFormModal({ deal, onSave, onClose }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
             <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
-            <button type="submit" style={btnPrimary}>{deal ? 'Save Changes' : 'Add Deal'}</button>
+            <button type="submit" style={btnPrimary}>{deal?.id ? 'Save Changes' : 'Add Deal'}</button>
           </div>
         </form>
       </div>
@@ -1819,7 +1840,7 @@ function QuotaModal({ settings, onSave, onClose }) {
 
 // ---- Accounts Section ----
 
-function AccountsSection({ accounts, deals, leads, onNewAccount, onSelectAccount }) {
+function AccountsSection({ accounts, deals, leads, leadsCount = 0, onNewAccount, onSelectAccount }) {
   const [search, setSearch] = useState('')
 
   const filtered = accounts.filter(a =>
@@ -1886,7 +1907,14 @@ function AccountsSection({ accounts, deals, leads, onNewAccount, onSelectAccount
         </div>
       ) : (
         <div style={{ ...cardStyle, padding: 32, textAlign: 'center', color: '#94a3b8' }}>
-          {search ? 'No accounts match your search.' : 'No accounts yet. Click "+ Add Account" to start prospecting.'}
+          {search ? 'No accounts match your search.' : (
+            <>
+              No accounts yet. Click "+ Add Account" to start prospecting.
+              {leadsCount > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12 }}>You have {leadsCount} lead{leadsCount !== 1 ? 's' : ''} in the Leads tab.</div>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -2247,8 +2275,9 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
 
 // ---- Lead Form Modal (with enrichment) ----
 
-function LeadFormModal({ lead, onSave, onClose }) {
+function LeadFormModal({ lead, accounts = [], onSave, onClose }) {
   const [form, setForm] = useState({
+    account_id: lead?.account_id || '',
     full_name: lead?.full_name || '',
     linkedin_url: lead?.linkedin_url || '',
     email: lead?.email || '',
@@ -2324,10 +2353,26 @@ function LeadFormModal({ lead, onSave, onClose }) {
     <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
       <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontWeight: 700, fontSize: 16 }}>{lead ? 'Edit Lead' : 'New Lead'}</div>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{lead?.id ? 'Edit Lead' : 'New Lead'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>{'✕'}</button>
         </div>
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
+          {/* Account selector */}
+          {accounts.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Account (Company)</label>
+              <select value={form.account_id} onChange={e => {
+                const acct = accounts.find(a => a.id === e.target.value)
+                set('account_id', e.target.value)
+                if (acct) { set('company', acct.name); if (acct.country && !form.country) set('country', acct.country); if (acct.industry && !form.industry) set('industry', acct.industry) }
+              }}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">— No account (standalone lead) —</option>
+                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+          )}
+
           {/* LinkedIn URL + Enrich */}
           <div style={{ marginBottom: 20, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#6366f1', marginBottom: 6 }}>
@@ -2383,7 +2428,7 @@ function LeadFormModal({ lead, onSave, onClose }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
             <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
-            <button type="submit" style={btnPrimary}>{lead ? 'Save Changes' : 'Add Lead'}</button>
+            <button type="submit" style={btnPrimary}>{lead?.id ? 'Save Changes' : 'Add Lead'}</button>
           </div>
         </form>
       </div>
