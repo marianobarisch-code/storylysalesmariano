@@ -358,7 +358,7 @@ export default function App() {
           accountMap.set(name, {
             id, name, industry: '', country: deal.country || '',
             website: '', company_size: '',
-            status: deal.deal_status === 'closed_won' ? 'customer' : 'engaged',
+            status: 'customer', // existing deals = already in pipeline, not in prospecting
             notes: '', created_at: now, updated_at: now,
           })
         }
@@ -837,7 +837,12 @@ export default function App() {
           <div>
             {/* Sub-tabs: Accounts / Leads */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#f1f5f9', borderRadius: 8, padding: 4, width: 'fit-content' }}>
-              {['accounts', 'leads'].map(tab => (
+              {(() => {
+              const prospectingAccountCount = (data.accounts || []).filter(a => {
+                const hasActiveDeals = data.deals.some(d => d.account_id === a.id && d.deal_status === 'open')
+                return !hasActiveDeals && a.status !== 'customer'
+              }).length
+              return ['accounts', 'leads'].map(tab => (
                 <button key={tab} onClick={() => setProspectingSubTab(tab)}
                   style={{
                     padding: '8px 20px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600,
@@ -845,20 +850,28 @@ export default function App() {
                     color: prospectingSubTab === tab ? '#6366f1' : '#64748b',
                     boxShadow: prospectingSubTab === tab ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
                   }}>
-                  {tab === 'accounts' ? `🏢 Accounts (${(data.accounts || []).length})` : `👤 Leads (${activeLeads.length})`}
+                  {tab === 'accounts' ? `🏢 Accounts (${prospectingAccountCount})` : `👤 Leads (${activeLeads.length})`}
                 </button>
-              ))}
+              ))
+            })()}
             </div>
 
-            {prospectingSubTab === 'accounts' && (
-              <AccountsSection
-                accounts={data.accounts || []}
-                deals={data.deals}
-                leads={data.leads || []}
-                onNewAccount={() => setShowNewAccount(true)}
-                onSelectAccount={setSelectedAccountId}
-              />
-            )}
+            {prospectingSubTab === 'accounts' && (() => {
+              // Only show accounts that are in prospecting phase (target/prospecting status, or no active deals)
+              const prospectingAccounts = (data.accounts || []).filter(a => {
+                const hasActiveDeals = data.deals.some(d => d.account_id === a.id && d.deal_status === 'open')
+                return !hasActiveDeals && a.status !== 'customer'
+              })
+              return (
+                <AccountsSection
+                  accounts={prospectingAccounts}
+                  deals={data.deals}
+                  leads={data.leads || []}
+                  onNewAccount={() => setShowNewAccount(true)}
+                  onSelectAccount={setSelectedAccountId}
+                />
+              )
+            })()}
 
             {prospectingSubTab === 'leads' && (
               <LeadsTab
@@ -984,6 +997,23 @@ export default function App() {
             onAddLead={() => { setShowNewLead(true) }}
             onSelectDeal={id => { setSelectedAccountId(null); setSelectedDealId(id) }}
             onSelectLead={id => { setSelectedAccountId(null); setSelectedLeadId(id) }}
+            onConvertToOpportunity={() => {
+              // Pre-fill deal form with account data and create deal
+              const dealForm = {
+                opportunity_name: `${acct.name} - New Deal`,
+                account_id: acct.id,
+                account_name: acct.name,
+                country: acct.country || '',
+                type: 'new_business',
+                stage: 'prospecting',
+              }
+              addDeal(dealForm)
+              // Update account status to engaged
+              updateAccount(acct.id, { status: 'engaged' })
+              setSelectedAccountId(null)
+              // Switch to Pipeline tab to show the new deal
+              setActiveTab('pipeline')
+            }}
           />
         )
       })()}
@@ -997,7 +1027,7 @@ function Header({ activeTab, setActiveTab }) {
   const tabs = [
     { key: 'home', label: 'Home' },
     { key: 'pipeline', label: 'Pipeline Management' },
-    { key: 'prospecting', label: 'Leads' },
+    { key: 'prospecting', label: 'Prospecting' },
   ]
   return (
     <div style={{ backgroundColor: '#fff', borderBottom: '1px solid #e2e8f0', marginBottom: 24 }}>
@@ -1946,7 +1976,7 @@ function AccountFormModal({ account, onSave, onClose }) {
 
 // ---- Account Detail Panel ----
 
-function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, onAddLead, onSelectDeal, onSelectLead }) {
+function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, onAddLead, onSelectDeal, onSelectLead, onConvertToOpportunity }) {
   const si = accountStatusInfo(account.status)
   const openDeals = deals.filter(d => d.deal_status === 'open')
   const wonDeals = deals.filter(d => d.deal_status === 'closed_won')
@@ -1974,6 +2004,11 @@ function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, 
             <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>✕</button>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            {onConvertToOpportunity && openDeals.length === 0 && (
+              <button onClick={onConvertToOpportunity} style={{ ...btnPrimary, fontSize: 13, padding: '6px 14px' }}>
+                🚀 Convert to Opportunity
+              </button>
+            )}
             <button onClick={onEdit} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px' }}>Edit</button>
             <button onClick={onDelete} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', color: '#ef4444' }}>Delete</button>
           </div>
