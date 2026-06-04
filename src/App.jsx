@@ -84,6 +84,25 @@ const DEAL_STAGES = [
   { key: 'contract_negotiation', label: 'Contract Negotiation' },
 ]
 
+// Account status
+const ACCOUNT_STATUSES = [
+  { key: 'target',     label: 'Target',     color: '#6366f1', bg: '#eef2ff', desc: 'Identified, not yet contacted' },
+  { key: 'prospecting', label: 'Prospecting', color: '#3b82f6', bg: '#eff6ff', desc: 'Actively reaching out' },
+  { key: 'engaged',    label: 'Engaged',    color: '#f59e0b', bg: '#fffbeb', desc: 'In conversation' },
+  { key: 'customer',   label: 'Customer',   color: '#22c55e', bg: '#f0fdf4', desc: 'Has active deal or won' },
+  { key: 'churned',    label: 'Churned',    color: '#94a3b8', bg: '#f1f5f9', desc: 'Former customer' },
+]
+
+const INDUSTRIES = [
+  'Retail / E-commerce', 'Fintech / Banking', 'Media / Entertainment', 'Telco',
+  'Food & Beverage', 'Travel / Hospitality', 'Health / Pharma', 'Gaming',
+  'Automotive', 'Education', 'Insurance', 'Real Estate', 'Other',
+]
+
+function accountStatusInfo(key) {
+  return ACCOUNT_STATUSES.find(s => s.key === key) || ACCOUNT_STATUSES[0]
+}
+
 const LEAD_STAGES = [
   { key: 'new',             label: 'New',             color: '#6366f1', bg: '#eef2ff' },
   { key: 'researching',     label: 'Researching',     color: '#8b5cf6', bg: '#f5f3ff' },
@@ -110,6 +129,7 @@ function leadSourceInfo(key) {
 }
 
 const DEFAULT_DATA = {
+  accounts: [],
   deals: [],
   scores: {},
   tracks: [],
@@ -226,6 +246,12 @@ export default function App() {
   const [deletingDealId, setDeletingDealId] = useState(null)
   const [showQuota, setShowQuota] = useState(false)
 
+  // Account state
+  const [showNewAccount, setShowNewAccount] = useState(false)
+  const [editAccount, setEditAccount] = useState(null)
+  const [selectedAccountId, setSelectedAccountId] = useState(null)
+  const [prospectingSubTab, setProspectingSubTab] = useState('accounts')
+
   // Gmail state
   const [gmailConnected, setGmailConnected] = useState(false)
   const [gmailEmail, setGmailEmail] = useState('')
@@ -296,7 +322,7 @@ export default function App() {
         })
         merged = { ...merged, deals: seededDeals, tracks: [...(merged.tracks || []), ...seededTracks], scores: { ...merged.scores, ...seededScores } }
       }
-      setData(merged)
+      setData(migrateAccounts(merged))
     } else {
       // First time: seed with deals
       const now = new Date().toISOString()
@@ -315,8 +341,47 @@ export default function App() {
         seededTracks.push(...createTrackRows(id))
         seededScores[id] = defaultScores()
       })
-      setData({ ...DEFAULT_DATA, deals: seededDeals, tracks: seededTracks, scores: seededScores })
+      setData(migrateAccounts({ ...DEFAULT_DATA, deals: seededDeals, tracks: seededTracks, scores: seededScores }))
     }
+    // Auto-create accounts from existing deals and leads (one-time migration)
+    // This is now a function that works on whatever data we're about to setData with
+    function migrateAccounts(d) {
+      if (!d.accounts) d.accounts = []
+      if (d.accounts.length > 0) return d // already migrated
+      const now = new Date().toISOString()
+      const accountMap = new Map() // name → account
+      // Create accounts from deals
+      ;(d.deals || []).forEach(deal => {
+        const name = deal.account_name
+        if (name && !accountMap.has(name)) {
+          const id = genId()
+          accountMap.set(name, {
+            id, name, industry: '', country: deal.country || '',
+            website: '', company_size: '',
+            status: deal.deal_status === 'closed_won' ? 'customer' : 'engaged',
+            notes: '', created_at: now, updated_at: now,
+          })
+        }
+        if (name && accountMap.has(name)) deal.account_id = accountMap.get(name).id
+      })
+      // Create accounts from leads (if company not already an account)
+      ;(d.leads || []).forEach(lead => {
+        const name = lead.company
+        if (name && !accountMap.has(name)) {
+          const id = genId()
+          accountMap.set(name, {
+            id, name, industry: lead.industry || '', country: lead.country || '',
+            website: '', company_size: lead.company_size || '',
+            status: 'prospecting',
+            notes: '', created_at: now, updated_at: now,
+          })
+        }
+        if (name && accountMap.has(name)) lead.account_id = accountMap.get(name).id
+      })
+      d.accounts = [...accountMap.values()]
+      return d
+    }
+
     // Reset column visibility to pick up new columns
     setVisibleCols(defaultCols())
     // Load Gmail tokens from localStorage
@@ -379,12 +444,62 @@ export default function App() {
 
   // ---- Handlers ----
 
+  // Account handlers
+  function addAccount(form) {
+    const id = genId()
+    const now = new Date().toISOString()
+    const account = {
+      id,
+      name: form.name || '',
+      industry: form.industry || '',
+      country: form.country || '',
+      website: form.website || '',
+      company_size: form.company_size || '',
+      status: form.status || 'target',
+      notes: form.notes || '',
+      created_at: now,
+      updated_at: now,
+    }
+    setData(d => ({ ...d, accounts: [...(d.accounts || []), account] }))
+    return id
+  }
+
+  function updateAccount(id, form) {
+    setData(d => ({
+      ...d,
+      accounts: (d.accounts || []).map(a => a.id !== id ? a : {
+        ...a, ...form, updated_at: new Date().toISOString(),
+      }),
+    }))
+  }
+
+  function deleteAccount(id) {
+    setData(d => ({
+      ...d,
+      accounts: (d.accounts || []).filter(a => a.id !== id),
+      // Unlink leads and deals but don't delete them
+      leads: (d.leads || []).map(l => l.account_id === id ? { ...l, account_id: '' } : l),
+      deals: d.deals.map(deal => deal.account_id === id ? { ...deal, account_id: '' } : deal),
+    }))
+  }
+
+  // Account-aware lead adding
+  function addLeadToAccount(accountId, form) {
+    const account = (data.accounts || []).find(a => a.id === accountId)
+    addLead({
+      ...form,
+      account_id: accountId,
+      company: form.company || (account ? account.name : ''),
+    })
+  }
+
   function addDeal(form) {
     const id = genId()
     const now = new Date().toISOString()
     const deal = {
       id,
       opportunity_name: form.opportunity_name || '',
+      account_id: form.account_id || '',
       account_name: form.account_name || '',
       contact_name: form.contact_name || '',
       stage: form.stage || 'prospecting',
@@ -501,6 +616,7 @@ export default function App() {
       next_action_date: form.next_action_date || '',
       tags: form.tags || '',
       notes: form.notes || '',
+      account_id: form.account_id || '',
       deal_id: null,
       created_at: now,
       updated_at: now,
@@ -718,13 +834,42 @@ export default function App() {
           </div>
         )}
         {activeTab === 'prospecting' && (
-          <LeadsTab
-            leads={allLeads} activeLeads={activeLeads} filteredLeads={filteredLeads}
-            stageFilter={leadStageFilter} setStageFilter={setLeadStageFilter}
-            sort={leadSort} handleSort={handleLeadSort}
-            onNewLead={() => setShowNewLead(true)}
-            onSelectLead={setSelectedLeadId}
-          />
+          <div>
+            {/* Sub-tabs: Accounts / Leads */}
+            <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#f1f5f9', borderRadius: 8, padding: 4, width: 'fit-content' }}>
+              {['accounts', 'leads'].map(tab => (
+                <button key={tab} onClick={() => setProspectingSubTab(tab)}
+                  style={{
+                    padding: '8px 20px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600,
+                    background: prospectingSubTab === tab ? '#fff' : 'transparent',
+                    color: prospectingSubTab === tab ? '#6366f1' : '#64748b',
+                    boxShadow: prospectingSubTab === tab ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                  }}>
+                  {tab === 'accounts' ? `🏢 Accounts (${(data.accounts || []).length})` : `👤 Leads (${activeLeads.length})`}
+                </button>
+              ))}
+            </div>
+
+            {prospectingSubTab === 'accounts' && (
+              <AccountsSection
+                accounts={data.accounts || []}
+                deals={data.deals}
+                leads={data.leads || []}
+                onNewAccount={() => setShowNewAccount(true)}
+                onSelectAccount={setSelectedAccountId}
+              />
+            )}
+
+            {prospectingSubTab === 'leads' && (
+              <LeadsTab
+                leads={allLeads} activeLeads={activeLeads} filteredLeads={filteredLeads}
+                stageFilter={leadStageFilter} setStageFilter={setLeadStageFilter}
+                sort={leadSort} handleSort={handleLeadSort}
+                onNewLead={() => setShowNewLead(true)}
+                onSelectLead={setSelectedLeadId}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -810,6 +955,38 @@ export default function App() {
           onClose={() => setConvertingLead(null)}
         />
       )}
+      {showNewAccount && (
+        <AccountFormModal
+          onSave={(form) => { addAccount(form); setShowNewAccount(false) }}
+          onClose={() => setShowNewAccount(false)}
+        />
+      )}
+      {editAccount && (
+        <AccountFormModal
+          account={editAccount}
+          onSave={(form) => { updateAccount(editAccount.id, form); setEditAccount(null) }}
+          onClose={() => setEditAccount(null)}
+        />
+      )}
+      {selectedAccountId && (() => {
+        const acct = (data.accounts || []).find(a => a.id === selectedAccountId)
+        if (!acct) return null
+        const acctDeals = data.deals.filter(d => d.account_id === acct.id)
+        const acctLeads = (data.leads || []).filter(l => l.account_id === acct.id)
+        return (
+          <AccountDetailPanel
+            account={acct}
+            deals={acctDeals}
+            leads={acctLeads}
+            onClose={() => setSelectedAccountId(null)}
+            onEdit={() => { setEditAccount(acct); setSelectedAccountId(null) }}
+            onDelete={() => { deleteAccount(acct.id); setSelectedAccountId(null) }}
+            onAddLead={() => { setShowNewLead(true) }}
+            onSelectDeal={id => { setSelectedAccountId(null); setSelectedDealId(id) }}
+            onSelectLead={id => { setSelectedAccountId(null); setSelectedLeadId(id) }}
+          />
+        )
+      })()}
     </div>
   )
 }
@@ -1609,6 +1786,292 @@ function QuotaModal({ settings, onSave, onClose }) {
 // ===================================================
 // ============== LEADS COMPONENTS ===================
 // ===================================================
+
+// ---- Accounts Section ----
+
+function AccountsSection({ accounts, deals, leads, onNewAccount, onSelectAccount }) {
+  const [search, setSearch] = useState('')
+
+  const filtered = accounts.filter(a =>
+    !search || a.name.toLowerCase().includes(search.toLowerCase()) ||
+    (a.industry || '').toLowerCase().includes(search.toLowerCase()) ||
+    (a.country || '').toLowerCase().includes(search.toLowerCase())
+  )
+
+  return (
+    <div>
+      {/* Header bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search accounts..."
+          style={{ padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, width: 260 }}
+        />
+        <button onClick={onNewAccount} style={btnPrimary}>+ Add Account</button>
+      </div>
+
+      {/* Account cards grid */}
+      {filtered.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+          {filtered.map(account => {
+            const acctDeals = deals.filter(d => d.account_id === account.id)
+            const acctLeads = leads.filter(l => l.account_id === account.id)
+            const openDeals = acctDeals.filter(d => d.deal_status === 'open')
+            const totalArr = openDeals.reduce((s, d) => s + (d.new_arr || 0), 0)
+            const si = accountStatusInfo(account.status)
+
+            return (
+              <div key={account.id} onClick={() => onSelectAccount(account.id)} style={{
+                ...cardStyle, cursor: 'pointer', transition: 'all 0.15s',
+                borderLeft: `3px solid ${si.color}`,
+              }}
+                onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.1)' }}
+                onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none' }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: '#0f172a' }}>{account.name}</div>
+                  <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                    {si.label}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 10 }}>
+                  {[account.industry, account.country].filter(Boolean).join(' · ') || '—'}
+                </div>
+                <div style={{ display: 'flex', gap: 16, fontSize: 12 }}>
+                  <span style={{ color: '#6366f1', fontWeight: 600 }}>
+                    {openDeals.length} deal{openDeals.length !== 1 ? 's' : ''}
+                  </span>
+                  <span style={{ color: '#3b82f6', fontWeight: 600 }}>
+                    {acctLeads.length} lead{acctLeads.length !== 1 ? 's' : ''}
+                  </span>
+                  {totalArr > 0 && (
+                    <span style={{ color: '#22c55e', fontWeight: 600 }}>
+                      {fmtMoney(totalArr)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div style={{ ...cardStyle, padding: 32, textAlign: 'center', color: '#94a3b8' }}>
+          {search ? 'No accounts match your search.' : 'No accounts yet. Click "+ Add Account" to start prospecting.'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- Account Form Modal ----
+
+function AccountFormModal({ account, onSave, onClose }) {
+  const [form, setForm] = useState({
+    name: account?.name || '',
+    industry: account?.industry || '',
+    country: account?.country || '',
+    website: account?.website || '',
+    company_size: account?.company_size || '',
+    status: account?.status || 'target',
+    notes: account?.notes || '',
+  })
+
+  function set(key, val) { setForm(f => ({ ...f, [key]: val })) }
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    onSave(form)
+  }
+
+  const field = (label, content, fullWidth = false) => (
+    <div style={{ gridColumn: fullWidth ? '1 / -1' : undefined }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>{label}</label>
+      {content}
+    </div>
+  )
+
+  const inp = (key, type = 'text', placeholder = '') => (
+    <input type={type} value={form[key]} placeholder={placeholder}
+      onChange={e => set(key, e.target.value)}
+      style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+  )
+
+  return (
+    <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 540, maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{account ? 'Edit Account' : 'New Account'}</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+        </div>
+        <form onSubmit={handleSubmit} style={{ padding: 24 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            {field('Company Name *', inp('name', 'text', 'e.g. BEES, Banco BMG...'), true)}
+            {field('Industry', (
+              <select value={form.industry} onChange={e => set('industry', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">— Select —</option>
+                {INDUSTRIES.map(i => <option key={i} value={i}>{i}</option>)}
+              </select>
+            ))}
+            {field('Country', (
+              <select value={form.country} onChange={e => set('country', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">— Select —</option>
+                {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            ))}
+            {field('Website', inp('website', 'text', 'https://'))}
+            {field('Company Size', inp('company_size', 'text', 'e.g. 200, 2700...'))}
+            {field('Status', (
+              <select value={form.status} onChange={e => set('status', e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                {ACCOUNT_STATUSES.map(s => <option key={s.key} value={s.key}>{s.label} — {s.desc}</option>)}
+              </select>
+            ))}
+            {field('Notes', (
+              <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3}
+                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
+            ), true)}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
+            <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
+            <button type="submit" style={btnPrimary}>{account ? 'Save' : 'Add Account'}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ---- Account Detail Panel ----
+
+function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, onAddLead, onSelectDeal, onSelectLead }) {
+  const si = accountStatusInfo(account.status)
+  const openDeals = deals.filter(d => d.deal_status === 'open')
+  const wonDeals = deals.filter(d => d.deal_status === 'closed_won')
+  const totalArr = openDeals.reduce((s, d) => s + (d.new_arr || 0), 0)
+
+  return (
+    <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
+        {/* Header */}
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 700, fontSize: 20 }}>🏢 {account.name}</span>
+                <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>{si.label}</span>
+              </div>
+              <div style={{ fontSize: 13, color: '#64748b' }}>
+                {[account.industry, account.country, account.company_size ? `${account.company_size} employees` : ''].filter(Boolean).join(' · ')}
+              </div>
+              {account.website && (
+                <a href={account.website.startsWith('http') ? account.website : `https://${account.website}`} target="_blank" rel="noreferrer"
+                  style={{ fontSize: 12, color: '#6366f1' }}>{account.website}</a>
+              )}
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button onClick={onEdit} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px' }}>Edit</button>
+            <button onClick={onDelete} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', color: '#ef4444' }}>Delete</button>
+          </div>
+        </div>
+
+        <div style={{ padding: 24 }}>
+          {/* Metrics */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+            <MiniCard label="Open Deals" value={openDeals.length} />
+            <MiniCard label="Won Deals" value={wonDeals.length} />
+            <MiniCard label="Pipeline ARR" value={fmtMoney(totalArr)} />
+            <MiniCard label="Leads" value={leads.length} />
+          </div>
+
+          {/* Opportunities */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <SectionLabel>Opportunities</SectionLabel>
+          </div>
+          {deals.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+              {deals.map(deal => {
+                const dsi = statusInfo(deal.deal_status)
+                const stageObj = DEAL_STAGES.find(s => s.key === deal.stage)
+                return (
+                  <div key={deal.id} onClick={() => onSelectDeal(deal.id)} style={{
+                    ...cardStyle, padding: 12, cursor: 'pointer', transition: 'all 0.1s',
+                  }}
+                    onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.08)' }}
+                    onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#6366f1' }}>{deal.opportunity_name || deal.account_name}</div>
+                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                          {stageObj ? stageObj.label : '—'} · {fmtMoney(deal.new_arr)}
+                        </div>
+                      </div>
+                      <span style={{ background: dsi.bg, color: dsi.color, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 600 }}>{dsi.label}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div style={{ ...cardStyle, padding: 12, textAlign: 'center', color: '#94a3b8', fontSize: 13, marginBottom: 20 }}>
+              No opportunities yet for this account
+            </div>
+          )}
+
+          {/* Leads */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <SectionLabel>Leads / Contacts</SectionLabel>
+            <button onClick={onAddLead} style={{ ...btnPrimary, fontSize: 11, padding: '4px 10px' }}>+ Add Lead</button>
+          </div>
+          {leads.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+              {leads.map(lead => {
+                const lsi = leadStageInfo(lead.stage)
+                return (
+                  <div key={lead.id} onClick={() => onSelectLead(lead.id)} style={{
+                    ...cardStyle, padding: 12, cursor: 'pointer', transition: 'all 0.1s',
+                  }}
+                    onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.08)' }}
+                    onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{lead.full_name}</div>
+                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                          {lead.title || '—'} {lead.email ? `· ${lead.email}` : ''}
+                        </div>
+                      </div>
+                      <span style={{ background: lsi.bg, color: lsi.color, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 600 }}>{lsi.label}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div style={{ ...cardStyle, padding: 12, textAlign: 'center', color: '#94a3b8', fontSize: 13, marginBottom: 20 }}>
+              No leads yet. Add contacts from this company to start engaging.
+            </div>
+          )}
+
+          {/* Notes */}
+          {account.notes && (
+            <>
+              <SectionLabel>Notes</SectionLabel>
+              <div style={{ ...cardStyle, padding: 12, fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap', background: '#f8fafc' }}>
+                {account.notes}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 // ---- Leads Tab ----
 
