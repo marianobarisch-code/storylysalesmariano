@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { loadData, saveData, exportToFile, importFromFile } from './storage.js'
+import { loadData, saveData, exportToFile, importFromFile, loadFromCloud, saveToCloudDebounced, flushCloudSave } from './storage.js'
 
 // ---- Constants ----
 
@@ -269,92 +269,16 @@ export default function App() {
   const [newDealPrefill, setNewDealPrefill] = useState(null)
   const [showCSVImport, setShowCSVImport] = useState(false)
 
+  const [cloudStatus, setCloudStatus] = useState('loading') // loading | synced | offline
+
   useEffect(() => {
-    const saved = loadData()
-    if (saved) {
-      let merged = { ...DEFAULT_DATA, ...saved }
-      // Migrate: auto-calc probability from stage for existing deals missing it
-      if (merged.deals && merged.deals.length > 0) {
-        merged.deals = merged.deals.map(d => ({
-          ...d,
-          opportunity_name: d.opportunity_name || d.account_name || '',
-          stage: d.stage || 'prospecting',
-          close_date: d.close_date || '',
-          added_arr: d.added_arr || 0,
-          probability: (d.probability && d.probability > 0) ? d.probability : calcProbFromStage(d.stage || 'prospecting'),
-          activities: d.activities || [],
-          next_step: d.next_step || '',
-          next_step_date: d.next_step_date || '',
-        }))
-      }
-      // One-time merge: add seed deals that don't exist yet (by opportunity_name)
-      const existingNames = new Set((merged.deals || []).map(d => d.opportunity_name || d.account_name))
-      const missingSeedDeals = SEED_DEALS.filter(s => !existingNames.has(s.opportunity_name))
-      if (missingSeedDeals.length > 0) {
-        const now = new Date().toISOString()
-        missingSeedDeals.forEach(seed => {
-          const id = genId()
-          merged.deals.push({
-            id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
-            next_step: '', next_step_date: '', activities: [],
-            last_meeting_date: '', last_update_note: '', last_update_date: '',
-            service_order_status: 'not_applicable', flowla_engagement: 'none',
-            flowla_url: '', notes: '', created_at: now, updated_at: now,
-          })
-          merged.tracks = [...(merged.tracks || []), ...createTrackRows(id)]
-          merged.scores = { ...(merged.scores || {}), [id]: defaultScores() }
-        })
-      }
-      // Seed pipeline deals if totally empty
-      if (!merged.deals || merged.deals.length === 0) {
-        const now = new Date().toISOString()
-        const seededDeals = []
-        const seededTracks = []
-        const seededScores = {}
-        SEED_DEALS.forEach(seed => {
-          const id = genId()
-          seededDeals.push({
-            id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
-            next_step: '', next_step_date: '', activities: [],
-            last_meeting_date: '', last_update_note: '', last_update_date: '',
-            service_order_status: 'not_applicable', flowla_engagement: 'none',
-            flowla_url: '', notes: '', created_at: now, updated_at: now,
-          })
-          seededTracks.push(...createTrackRows(id))
-          seededScores[id] = defaultScores()
-        })
-        merged = { ...merged, deals: seededDeals, tracks: [...(merged.tracks || []), ...seededTracks], scores: { ...merged.scores, ...seededScores } }
-      }
-      setData(migrateAccounts(merged))
-    } else {
-      // First time: seed with deals
-      const now = new Date().toISOString()
-      const seededDeals = []
-      const seededTracks = []
-      const seededScores = {}
-      SEED_DEALS.forEach(seed => {
-        const id = genId()
-        seededDeals.push({
-          id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
-          next_step: '', next_step_date: '', activities: [],
-          last_meeting_date: '', last_update_note: '', last_update_date: '',
-          service_order_status: 'not_applicable', flowla_engagement: 'none',
-          flowla_url: '', notes: '', created_at: now, updated_at: now,
-        })
-        seededTracks.push(...createTrackRows(id))
-        seededScores[id] = defaultScores()
-      })
-      setData(migrateAccounts({ ...DEFAULT_DATA, deals: seededDeals, tracks: seededTracks, scores: seededScores }))
-    }
-    // Auto-create accounts from existing deals and leads (one-time migration)
-    // This is now a function that works on whatever data we're about to setData with
+    // Migration helpers (defined inside effect to access genId, etc.)
     function migrateAccounts(d) {
       if (!d.accounts) d.accounts = []
       if (!d.settings) d.settings = {}
-      if (d.settings._accounts_migrated) return d // already migrated
+      if (d.settings._accounts_migrated) return d
       const now = new Date().toISOString()
-      const accountMap = new Map() // name → account
-      // Create accounts from deals
+      const accountMap = new Map()
       ;(d.deals || []).forEach(deal => {
         const name = deal.account_name
         if (name && !accountMap.has(name)) {
@@ -362,13 +286,12 @@ export default function App() {
           accountMap.set(name, {
             id, name, industry: '', country: deal.country || '',
             website: '', company_size: '',
-            status: 'customer', // existing deals = already in pipeline, not in prospecting
+            status: 'customer',
             notes: '', created_at: now, updated_at: now,
           })
         }
         if (name && accountMap.has(name)) deal.account_id = accountMap.get(name).id
       })
-      // Create accounts from leads (if company not already an account)
       ;(d.leads || []).forEach(lead => {
         const name = lead.company
         if (name && !accountMap.has(name)) {
@@ -387,9 +310,90 @@ export default function App() {
       return d
     }
 
-    // Reset column visibility to pick up new columns
+    function processSaved(saved) {
+      let merged = { ...DEFAULT_DATA, ...saved }
+      if (merged.deals && merged.deals.length > 0) {
+        merged.deals = merged.deals.map(d => ({
+          ...d,
+          opportunity_name: d.opportunity_name || d.account_name || '',
+          stage: d.stage || 'prospecting',
+          close_date: d.close_date || '',
+          added_arr: d.added_arr || 0,
+          probability: (d.probability && d.probability > 0) ? d.probability : calcProbFromStage(d.stage || 'prospecting'),
+          activities: d.activities || [],
+          next_step: d.next_step || '',
+          next_step_date: d.next_step_date || '',
+        }))
+      }
+      const existingNames = new Set((merged.deals || []).map(d => d.opportunity_name || d.account_name))
+      const missingSeedDeals = SEED_DEALS.filter(s => !existingNames.has(s.opportunity_name))
+      if (missingSeedDeals.length > 0) {
+        const now = new Date().toISOString()
+        missingSeedDeals.forEach(seed => {
+          const id = genId()
+          merged.deals.push({
+            id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage),
+            next_step: '', next_step_date: '', activities: [],
+            last_meeting_date: '', last_update_note: '', last_update_date: '',
+            service_order_status: 'not_applicable', flowla_engagement: 'none',
+            flowla_url: '', notes: '', created_at: now, updated_at: now,
+          })
+          merged.tracks = [...(merged.tracks || []), ...createTrackRows(id)]
+          merged.scores = { ...(merged.scores || {}), [id]: defaultScores() }
+        })
+      }
+      if (!merged.deals || merged.deals.length === 0) {
+        const now = new Date().toISOString()
+        const seededDeals = []; const seededTracks = []; const seededScores = {}
+        SEED_DEALS.forEach(seed => {
+          const id = genId()
+          seededDeals.push({ id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage), next_step: '', next_step_date: '', activities: [], last_meeting_date: '', last_update_note: '', last_update_date: '', service_order_status: 'not_applicable', flowla_engagement: 'none', flowla_url: '', notes: '', created_at: now, updated_at: now })
+          seededTracks.push(...createTrackRows(id)); seededScores[id] = defaultScores()
+        })
+        merged = { ...merged, deals: seededDeals, tracks: [...(merged.tracks || []), ...seededTracks], scores: { ...merged.scores, ...seededScores } }
+      }
+      return migrateAccounts(merged)
+    }
+
+    function seedFreshData() {
+      const now = new Date().toISOString()
+      const seededDeals = []; const seededTracks = []; const seededScores = {}
+      SEED_DEALS.forEach(seed => {
+        const id = genId()
+        seededDeals.push({ id, ...seed, contact_name: '', deal_status: 'open', probability: calcProbFromStage(seed.stage), next_step: '', next_step_date: '', activities: [], last_meeting_date: '', last_update_note: '', last_update_date: '', service_order_status: 'not_applicable', flowla_engagement: 'none', flowla_url: '', notes: '', created_at: now, updated_at: now })
+        seededTracks.push(...createTrackRows(id)); seededScores[id] = defaultScores()
+      })
+      return migrateAccounts({ ...DEFAULT_DATA, deals: seededDeals, tracks: seededTracks, scores: seededScores })
+    }
+
+    // Load: try cloud first, fall back to localStorage
+    async function init() {
+      const cloudData = await loadFromCloud()
+      const localData = loadData()
+
+      if (cloudData) {
+        // Cloud has data — use it as source of truth
+        setData(processSaved(cloudData))
+        saveData(cloudData) // sync local cache
+        setCloudStatus('synced')
+      } else if (localData) {
+        // No cloud data but local exists — use local and push to cloud
+        const processed = processSaved(localData)
+        setData(processed)
+        setCloudStatus('synced')
+        // Migrate existing localStorage data to cloud
+        saveToCloudDebounced(processed)
+      } else {
+        // First time ever
+        const fresh = seedFreshData()
+        setData(fresh)
+        setCloudStatus('synced')
+        saveToCloudDebounced(fresh)
+      }
+    }
+    init()
+
     setVisibleCols(defaultCols())
-    // Load Gmail tokens from localStorage
     const savedGmail = localStorage.getItem('storyly_gmail')
     if (savedGmail) {
       try {
@@ -443,18 +447,25 @@ export default function App() {
   const saveRef = useRef(null)
   const dataRef = useRef(data)
   dataRef.current = data // always keep ref in sync
+  const initDone = useRef(false)
 
   useEffect(() => {
+    // Skip saving during initial load to prevent overwriting cloud data with defaults
+    if (!initDone.current) { initDone.current = true; return }
     clearTimeout(saveRef.current)
-    saveRef.current = setTimeout(() => saveData(data), 400)
+    saveRef.current = setTimeout(() => {
+      saveData(data)              // instant local save
+      saveToCloudDebounced(data)  // debounced cloud save (2s)
+    }, 400)
     return () => clearTimeout(saveRef.current)
   }, [data])
 
-  // Flush pending save immediately on page unload (prevents data loss on refresh)
+  // Flush pending saves immediately on page unload
   useEffect(() => {
     function handleBeforeUnload() {
       clearTimeout(saveRef.current)
       saveData(dataRef.current)
+      flushCloudSave(dataRef.current)
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -791,7 +802,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#f8fafc', minHeight: '100vh' }}>
-      <Header activeTab={activeTab} setActiveTab={setActiveTab} />
+      <Header activeTab={activeTab} setActiveTab={setActiveTab} cloudStatus={cloudStatus} />
 
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 16px 40px' }}>
         {activeTab === 'pipeline' && (
@@ -1078,12 +1089,15 @@ export default function App() {
 
 // ---- Header ----
 
-function Header({ activeTab, setActiveTab }) {
+function Header({ activeTab, setActiveTab, cloudStatus }) {
   const tabs = [
     { key: 'home', label: 'Home' },
     { key: 'pipeline', label: 'Pipeline Management' },
     { key: 'prospecting', label: 'Prospecting' },
   ]
+  const statusIcon = cloudStatus === 'synced' ? '●' : cloudStatus === 'loading' ? '○' : '●'
+  const statusColor = cloudStatus === 'synced' ? '#22c55e' : cloudStatus === 'loading' ? '#94a3b8' : '#f59e0b'
+  const statusLabel = cloudStatus === 'synced' ? 'Cloud synced' : cloudStatus === 'loading' ? 'Loading...' : 'Offline (local only)'
   return (
     <div style={{ backgroundColor: '#fff', borderBottom: '1px solid #e2e8f0', marginBottom: 24 }}>
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 16px', display: 'flex', alignItems: 'center' }}>
@@ -1101,6 +1115,10 @@ function Header({ activeTab, setActiveTab }) {
             {t.label}
           </button>
         ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '14px 0' }}>
+          <span style={{ color: statusColor, fontSize: 10 }}>{statusIcon}</span>
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>{statusLabel}</span>
+        </div>
       </div>
     </div>
   )
