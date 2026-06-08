@@ -440,11 +440,24 @@ export default function App() {
   }
 
   const saveRef = useRef(null)
+  const dataRef = useRef(data)
+  dataRef.current = data // always keep ref in sync
+
   useEffect(() => {
     clearTimeout(saveRef.current)
     saveRef.current = setTimeout(() => saveData(data), 400)
     return () => clearTimeout(saveRef.current)
   }, [data])
+
+  // Flush pending save immediately on page unload (prevents data loss on refresh)
+  useEffect(() => {
+    function handleBeforeUnload() {
+      clearTimeout(saveRef.current)
+      saveData(dataRef.current)
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [])
 
   // ---- Handlers ----
 
