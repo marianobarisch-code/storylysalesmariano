@@ -268,6 +268,7 @@ export default function App() {
   const [newLeadPrefill, setNewLeadPrefill] = useState(null)
   const [newDealPrefill, setNewDealPrefill] = useState(null)
   const [showCSVImport, setShowCSVImport] = useState(false)
+  const [inlineAccountCallback, setInlineAccountCallback] = useState(null) // callback from lead/deal form
 
   const [cloudStatus, setCloudStatus] = useState('loading') // loading | synced | offline
 
@@ -940,6 +941,10 @@ export default function App() {
             )}
           </div>
         )}
+        {activeTab === 'analytics' && (
+          <AnalyticsTab leads={allLeads} accounts={data.accounts || []} deals={data.deals || []} settings={data.settings || {}}
+            onUpdateSettings={(s) => setData(d => ({ ...d, settings: { ...d.settings, ...s } }))} />
+        )}
       </div>
 
       {showNewDeal && (
@@ -948,6 +953,7 @@ export default function App() {
           accounts={data.accounts || []}
           onSave={(form) => { addDeal(form); setShowNewDeal(false); setNewDealPrefill(null) }}
           onClose={() => { setShowNewDeal(false); setNewDealPrefill(null) }}
+          onCreateAccount={(cb) => setInlineAccountCallback(() => cb)}
         />
       )}
       {editDeal && (
@@ -956,6 +962,7 @@ export default function App() {
           accounts={data.accounts || []}
           onSave={(form) => { updateDeal(editDeal.id, form); setEditDeal(null) }}
           onClose={() => setEditDeal(null)}
+          onCreateAccount={(cb) => setInlineAccountCallback(() => cb)}
         />
       )}
       {selectedDeal && (
@@ -996,6 +1003,7 @@ export default function App() {
           accounts={data.accounts || []}
           onSave={(form) => { addLead(form); setShowNewLead(false); setNewLeadPrefill(null) }}
           onClose={() => { setShowNewLead(false); setNewLeadPrefill(null) }}
+          onCreateAccount={(cb) => setInlineAccountCallback(() => cb)}
         />
       )}
       {editLeadData && (
@@ -1004,6 +1012,7 @@ export default function App() {
           accounts={data.accounts || []}
           onSave={(form) => { updateLeadFn(editLeadData.id, form); setEditLeadData(null) }}
           onClose={() => setEditLeadData(null)}
+          onCreateAccount={(cb) => setInlineAccountCallback(() => cb)}
         />
       )}
       {selectedLead && (
@@ -1083,6 +1092,19 @@ export default function App() {
           />
         )
       })()}
+
+      {/* Inline account creation from within Lead/Deal forms */}
+      {inlineAccountCallback && (
+        <AccountFormModal
+          onSave={(form) => {
+            const newId = addAccount(form)
+            const newAcct = { id: newId, name: form.name, country: form.country || '', industry: form.industry || '' }
+            inlineAccountCallback(newAcct)
+            setInlineAccountCallback(null)
+          }}
+          onClose={() => setInlineAccountCallback(null)}
+        />
+      )}
     </div>
   )
 }
@@ -1094,6 +1116,7 @@ function Header({ activeTab, setActiveTab, cloudStatus }) {
     { key: 'home', label: 'Home' },
     { key: 'pipeline', label: 'Pipeline Management' },
     { key: 'prospecting', label: 'Prospecting' },
+    { key: 'analytics', label: 'Analytics' },
   ]
   const statusIcon = cloudStatus === 'synced' ? '●' : cloudStatus === 'loading' ? '○' : '●'
   const statusColor = cloudStatus === 'synced' ? '#22c55e' : cloudStatus === 'loading' ? '#94a3b8' : '#f59e0b'
@@ -1430,7 +1453,7 @@ function TrackDots({ tracks }) {
 
 // ---- Deal Form Modal ----
 
-function DealFormModal({ deal, accounts = [], onSave, onClose }) {
+function DealFormModal({ deal, accounts = [], onSave, onClose, onCreateAccount }) {
   const [form, setForm] = useState({
     opportunity_name: deal?.opportunity_name || '',
     account_id: deal?.account_id || '',
@@ -1494,18 +1517,21 @@ function DealFormModal({ deal, accounts = [], onSave, onClose }) {
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             {field('Opportunity Name *', inp('opportunity_name', 'text', 'e.g. BEES (Brasil) - Renewal 2026/27'), true)}
-            {field('Account', accounts.length > 0 ? (
-              <select value={form.account_id} onChange={e => {
-                const acct = accounts.find(a => a.id === e.target.value)
-                set('account_id', e.target.value)
-                if (acct) set('account_name', acct.name)
-              }}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                <option value="">— Select or type below —</option>
-                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            ) : inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
-            {form.account_id ? null : field('Account Name', inp('account_name', 'text', 'e.g. BEES (Brasil)'))}
+            {field('Account *', (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <select value={form.account_id} onChange={e => {
+                  const acct = accounts.find(a => a.id === e.target.value)
+                  set('account_id', e.target.value)
+                  if (acct) { set('account_name', acct.name); if (acct.country && !form.country) set('country', acct.country) }
+                }}
+                  style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                  <option value="">— Select account —</option>
+                  {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                {onCreateAccount && <button type="button" onClick={() => onCreateAccount((newAcct) => { set('account_id', newAcct.id); set('account_name', newAcct.name); if (newAcct.country && !form.country) set('country', newAcct.country) })}
+                  style={{ ...btnSecondary, whiteSpace: 'nowrap', fontSize: 12, padding: '8px 12px' }}>+ New</button>}
+              </div>
+            ))}
             {field('Contact Name', inp('contact_name'))}
             {field('Stage', sel('stage', DEAL_STAGES.map(s => ({ value: s.key, label: s.label }))))}
             {field('Close Date', inp('close_date', 'date'))}
@@ -2342,7 +2368,7 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
 
 // ---- Lead Form Modal (with enrichment) ----
 
-function LeadFormModal({ lead, accounts = [], onSave, onClose }) {
+function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }) {
   const [form, setForm] = useState({
     account_id: lead?.account_id || '',
     full_name: lead?.full_name || '',
@@ -2425,20 +2451,22 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose }) {
         </div>
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
           {/* Account selector */}
-          {accounts.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Account (Company)</label>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Account (Company)</label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <select value={form.account_id} onChange={e => {
                 const acct = accounts.find(a => a.id === e.target.value)
                 set('account_id', e.target.value)
                 if (acct) { set('company', acct.name); if (acct.country && !form.country) set('country', acct.country); if (acct.industry && !form.industry) set('industry', acct.industry) }
               }}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                <option value="">— No account (standalone lead) —</option>
+                style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                <option value="">— Select account —</option>
                 {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
+              {onCreateAccount && <button type="button" onClick={() => onCreateAccount((newAcct) => { set('account_id', newAcct.id); set('company', newAcct.name); if (newAcct.country && !form.country) set('country', newAcct.country); if (newAcct.industry && !form.industry) set('industry', newAcct.industry) })}
+                style={{ ...btnSecondary, whiteSpace: 'nowrap', fontSize: 12, padding: '8px 12px' }}>+ New</button>}
             </div>
-          )}
+          </div>
 
           {/* LinkedIn URL + Enrich */}
           <div style={{ marginBottom: 20, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
@@ -3052,6 +3080,316 @@ function CSVImportModal({ existingAccounts, onImport, onClose }) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ---- Analytics Tab ----
+
+function getWeekStart(date) {
+  const d = new Date(date)
+  const day = d.getDay()
+  d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)) // Monday
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+function getWeekEnd(start) {
+  const d = new Date(start)
+  d.setDate(d.getDate() + 6)
+  d.setHours(23, 59, 59, 999)
+  return d
+}
+
+function getMonthStart(date) {
+  const d = new Date(date)
+  d.setDate(1)
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+function getMonthEnd(start) {
+  const d = new Date(start)
+  d.setMonth(d.getMonth() + 1)
+  d.setDate(0)
+  d.setHours(23, 59, 59, 999)
+  return d
+}
+
+function getPeriods(view) {
+  const now = new Date()
+  const periods = []
+  if (view === 'daily') {
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now)
+      d.setDate(d.getDate() - i)
+      d.setHours(0, 0, 0, 0)
+      const end = new Date(d)
+      end.setHours(23, 59, 59, 999)
+      periods.push({ start: d, end, label: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) })
+    }
+  } else if (view === 'weekly') {
+    for (let i = 7; i >= 0; i--) {
+      const ref = new Date(now)
+      ref.setDate(ref.getDate() - i * 7)
+      const start = getWeekStart(ref)
+      const end = getWeekEnd(start)
+      const label = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      periods.push({ start, end, label })
+    }
+  } else {
+    for (let i = 5; i >= 0; i--) {
+      const ref = new Date(now)
+      ref.setMonth(ref.getMonth() - i)
+      const start = getMonthStart(ref)
+      const end = getMonthEnd(start)
+      periods.push({ start, end, label: start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) })
+    }
+  }
+  return periods
+}
+
+// Stages in order for funnel calculation
+const LEAD_FUNNEL_STAGES = ['new', 'researching', 'engaging', 'nurturing', 'qualified', 'converted']
+
+function calcPeriodStats(leads, accounts, period) {
+  const periodLeads = leads.filter(l => {
+    const d = new Date(l.created_at)
+    return d >= period.start && d <= period.end
+  })
+  const periodAccounts = accounts.filter(a => {
+    const d = new Date(a.created_at)
+    return d >= period.start && d <= period.end
+  })
+  const total = periodLeads.length
+  if (total === 0) return { total: 0, accounts: periodAccounts.length, acceptance: 0, response: 0, meeting: 0, qualified: 0, converted: 0 }
+
+  // Acceptance = moved past 'new' (researching+)
+  const acceptance = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 1 || l.stage === 'not_interested').length
+  // Response = moved to engaging+
+  const response = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 2).length
+  // Meeting = moved to nurturing+
+  const meeting = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 3).length
+  // Qualified
+  const qualified = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 4).length
+  // Converted to opportunity
+  const converted = periodLeads.filter(l => l.stage === 'converted').length
+
+  return {
+    total, accounts: periodAccounts.length,
+    acceptance: Math.round((acceptance / total) * 100),
+    response: Math.round((response / total) * 100),
+    meeting: Math.round((meeting / total) * 100),
+    qualified: Math.round((qualified / total) * 100),
+    converted: Math.round((converted / total) * 100),
+  }
+}
+
+function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
+  const [view, setView] = useState('weekly')
+  const [showGoals, setShowGoals] = useState(false)
+  const [goals, setGoals] = useState({
+    leads_per_week: settings.goal_leads_per_week || 20,
+    accounts_per_week: settings.goal_accounts_per_week || 5,
+    acceptance_rate: settings.goal_acceptance_rate || 30,
+    response_rate: settings.goal_response_rate || 15,
+    meeting_rate: settings.goal_meeting_rate || 10,
+  })
+
+  const periods = getPeriods(view)
+  const periodStats = periods.map(p => ({ ...p, stats: calcPeriodStats(leads, accounts, p) }))
+
+  // Current period (last one)
+  const current = periodStats[periodStats.length - 1]
+  const previous = periodStats.length > 1 ? periodStats[periodStats.length - 2] : null
+
+  function saveGoals() {
+    onUpdateSettings({
+      goal_leads_per_week: goals.leads_per_week,
+      goal_accounts_per_week: goals.accounts_per_week,
+      goal_acceptance_rate: goals.acceptance_rate,
+      goal_response_rate: goals.response_rate,
+      goal_meeting_rate: goals.meeting_rate,
+    })
+    setShowGoals(false)
+  }
+
+  function GoalProgress({ label, value, goal, suffix = '' }) {
+    const pct = goal > 0 ? Math.min(100, Math.round((value / goal) * 100)) : 0
+    const color = pct >= 100 ? '#22c55e' : pct >= 50 ? '#f59e0b' : '#ef4444'
+    return (
+      <div style={{ ...cardStyle, padding: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{ fontSize: 12, color: '#64748b' }}>{label}</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color }}>{value}{suffix} / {goal}{suffix}</span>
+        </div>
+        <div style={{ height: 8, background: '#f1f5f9', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 4, transition: 'width 0.3s' }} />
+        </div>
+        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, textAlign: 'right' }}>{pct}%</div>
+      </div>
+    )
+  }
+
+  function RateCard({ label, value, prev, icon }) {
+    const diff = prev != null ? value - prev : null
+    return (
+      <div style={{ ...cardStyle, padding: 16, textAlign: 'center' }}>
+        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>{icon} {label}</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: '#1e293b' }}>{value}%</div>
+        {diff != null && diff !== 0 && (
+          <div style={{ fontSize: 12, color: diff > 0 ? '#22c55e' : '#ef4444', marginTop: 2 }}>
+            {diff > 0 ? '+' : ''}{diff}% vs prev
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 20, color: '#1e293b' }}>Prospecting Analytics</div>
+          <div style={{ fontSize: 13, color: '#64748b' }}>Track your outreach consistency and conversion rates</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowGoals(true)} style={{ ...btnSecondary, fontSize: 13 }}>Goals</button>
+          <div style={{ display: 'flex', background: '#f1f5f9', borderRadius: 6, padding: 2 }}>
+            {['daily', 'weekly', 'monthly'].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{
+                padding: '6px 14px', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                background: view === v ? '#fff' : 'transparent', color: view === v ? '#6366f1' : '#64748b',
+                boxShadow: view === v ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+              }}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Goals progress (current period) */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 12 }}>
+          Current Period: {current.label}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+          <GoalProgress label="Leads Added" value={current.stats.total} goal={view === 'daily' ? Math.ceil(goals.leads_per_week / 5) : view === 'weekly' ? goals.leads_per_week : goals.leads_per_week * 4} />
+          <GoalProgress label="Accounts Added" value={current.stats.accounts} goal={view === 'daily' ? Math.ceil(goals.accounts_per_week / 5) : view === 'weekly' ? goals.accounts_per_week : goals.accounts_per_week * 4} />
+          <GoalProgress label="Acceptance Rate" value={current.stats.acceptance} goal={goals.acceptance_rate} suffix="%" />
+        </div>
+      </div>
+
+      {/* Conversion funnel rates */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 12 }}>Conversion Rates (leads created in this period)</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+          <RateCard label="Acceptance" value={current.stats.acceptance} prev={previous?.stats.acceptance} icon="" />
+          <RateCard label="Response" value={current.stats.response} prev={previous?.stats.response} icon="" />
+          <RateCard label="Meeting" value={current.stats.meeting} prev={previous?.stats.meeting} icon="" />
+          <RateCard label="Qualified" value={current.stats.qualified} prev={previous?.stats.qualified} icon="" />
+          <RateCard label="Converted" value={current.stats.converted} prev={previous?.stats.converted} icon="" />
+        </div>
+      </div>
+
+      {/* Timeline table */}
+      <div style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0' }}>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>Activity Over Time</div>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: '#f8fafc' }}>
+                <th style={{ padding: '10px 16px', textAlign: 'left', fontWeight: 600, whiteSpace: 'nowrap' }}>Period</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Leads</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Accounts</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Acceptance</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Response</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Meeting</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Qualified</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Converted</th>
+              </tr>
+            </thead>
+            <tbody>
+              {periodStats.map((p, i) => {
+                const s = p.stats
+                const isLast = i === periodStats.length - 1
+                return (
+                  <tr key={p.label} style={{ borderTop: '1px solid #f1f5f9', background: isLast ? '#fefce8' : undefined }}>
+                    <td style={{ padding: '10px 16px', fontWeight: isLast ? 600 : 400, whiteSpace: 'nowrap' }}>
+                      {p.label} {isLast && <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 600 }}>CURRENT</span>}
+                    </td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>{s.total}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>{s.accounts}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.acceptance + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.response + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.meeting + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.qualified + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.converted + '%' : '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Visual bar chart */}
+      <div style={{ ...cardStyle, marginTop: 16, padding: 20 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 16 }}>Leads Added Per Period</div>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 120 }}>
+          {periodStats.map((p, i) => {
+            const max = Math.max(...periodStats.map(pp => pp.stats.total), 1)
+            const h = Math.max(4, (p.stats.total / max) * 100)
+            const isLast = i === periodStats.length - 1
+            const goalLine = view === 'daily' ? Math.ceil(goals.leads_per_week / 5) : view === 'weekly' ? goals.leads_per_week : goals.leads_per_week * 4
+            return (
+              <div key={p.label} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: p.stats.total >= goalLine ? '#22c55e' : '#64748b' }}>
+                  {p.stats.total}
+                </div>
+                <div style={{
+                  width: '100%', maxWidth: 40, height: h, borderRadius: '4px 4px 0 0',
+                  background: isLast ? '#6366f1' : p.stats.total >= goalLine ? '#22c55e' : '#cbd5e1',
+                  transition: 'height 0.3s',
+                }} />
+                <div style={{ fontSize: 9, color: '#94a3b8', textAlign: 'center', lineHeight: 1.2 }}>
+                  {view === 'daily' ? p.label.split(',')[0] : view === 'weekly' ? p.label.split(' - ')[0] : p.label.split(' ')[0]}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Goals modal */}
+      {showGoals && (
+        <div style={overlayStyle} onClick={e => { if (e.target === e.currentTarget) setShowGoals(false) }}>
+          <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 420, padding: 28 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Weekly Goals</div>
+            <div style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Set your weekly prospecting targets</div>
+            {[
+              { key: 'leads_per_week', label: 'Leads per week', type: 'number' },
+              { key: 'accounts_per_week', label: 'Accounts per week', type: 'number' },
+              { key: 'acceptance_rate', label: 'Target acceptance rate (%)', type: 'number' },
+              { key: 'response_rate', label: 'Target response rate (%)', type: 'number' },
+              { key: 'meeting_rate', label: 'Target meeting rate (%)', type: 'number' },
+            ].map(g => (
+              <div key={g.key} style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>{g.label}</label>
+                <input type={g.type} value={goals[g.key]}
+                  onChange={e => setGoals(prev => ({ ...prev, [g.key]: Number(e.target.value) || 0 }))}
+                  style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13 }} />
+              </div>
+            ))}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+              <button onClick={() => setShowGoals(false)} style={btnSecondary}>Cancel</button>
+              <button onClick={saveGoals} style={btnPrimary}>Save Goals</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
