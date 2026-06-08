@@ -267,6 +267,7 @@ export default function App() {
   const [convertingLead, setConvertingLead] = useState(null)
   const [newLeadPrefill, setNewLeadPrefill] = useState(null)
   const [newDealPrefill, setNewDealPrefill] = useState(null)
+  const [showCSVImport, setShowCSVImport] = useState(false)
 
   useEffect(() => {
     const saved = loadData()
@@ -708,6 +709,30 @@ export default function App() {
     setSelectedLeadId(null)
   }
 
+  function importCSVData(newAccounts, newLeads) {
+    setData(d => {
+      const existingAccounts = d.accounts || []
+      const existingAccountNames = new Set(existingAccounts.map(a => a.name.toLowerCase()))
+      // Only add accounts that don't already exist (by name)
+      const accountsToAdd = newAccounts.filter(a => !existingAccountNames.has(a.name.toLowerCase()))
+      // Build map: account name → id (existing + new)
+      const accountIdMap = new Map()
+      existingAccounts.forEach(a => accountIdMap.set(a.name.toLowerCase(), a.id))
+      accountsToAdd.forEach(a => accountIdMap.set(a.name.toLowerCase(), a.id))
+      // Link leads to accounts
+      const linkedLeads = newLeads.map(lead => ({
+        ...lead,
+        account_id: accountIdMap.get((lead.company || '').toLowerCase()) || lead.account_id || '',
+      }))
+      return {
+        ...d,
+        accounts: [...existingAccounts, ...accountsToAdd],
+        leads: [...(d.leads || []), ...linkedLeads],
+      }
+    })
+    setShowCSVImport(false)
+  }
+
   function handleLeadSort(field) {
     setLeadSort(s => s.field === field
       ? { field, dir: s.dir === 'asc' ? 'desc' : 'asc' }
@@ -899,6 +924,7 @@ export default function App() {
                 sort={leadSort} handleSort={handleLeadSort}
                 onNewLead={() => setShowNewLead(true)}
                 onSelectLead={setSelectedLeadId}
+                onImportCSV={() => setShowCSVImport(true)}
               />
             )}
           </div>
@@ -991,6 +1017,13 @@ export default function App() {
           lead={convertingLead}
           onConvert={(dealForm) => convertLeadToDeal(convertingLead, dealForm)}
           onClose={() => setConvertingLead(null)}
+        />
+      )}
+      {showCSVImport && (
+        <CSVImportModal
+          existingAccounts={data.accounts || []}
+          onImport={importCSVData}
+          onClose={() => setShowCSVImport(false)}
         />
       )}
       {showNewAccount && (
@@ -2151,7 +2184,7 @@ function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, 
 
 // ---- Leads Tab ----
 
-function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilter, sort, handleSort, onNewLead, onSelectLead }) {
+function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilter, sort, handleSort, onNewLead, onSelectLead, onImportCSV }) {
   const stageCounts = {}
   LEAD_STAGES.forEach(s => { stageCounts[s.key] = leads.filter(l => l.stage === s.key).length })
 
@@ -2168,7 +2201,10 @@ function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilt
       {/* Toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12, flexWrap: 'wrap' }}>
         <LeadStageFilter stageFilter={stageFilter} setStageFilter={setStageFilter} leads={leads} activeLeads={activeLeads} />
-        <button onClick={onNewLead} style={btnPrimary}>+ New Lead</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={onImportCSV} style={{ ...btnSecondary, fontSize: 13 }}>📄 Import CSV</button>
+          <button onClick={onNewLead} style={btnPrimary}>+ New Lead</button>
+        </div>
       </div>
 
       {/* Table */}
@@ -2645,6 +2681,358 @@ function ConvertLeadModal({ lead, onConvert, onClose }) {
             <button type="submit" style={{ ...btnPrimary, background: '#22c55e' }}>Create Deal</button>
           </div>
         </form>
+      </div>
+    </div>
+  )
+}
+
+// ---- CSV Import Modal ----
+
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim())
+  if (lines.length < 2) return { headers: [], rows: [] }
+  function splitRow(line) {
+    const result = []; let current = ''; let inQuotes = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '"') { inQuotes = !inQuotes; continue }
+      if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ''; continue }
+      current += ch
+    }
+    result.push(current.trim())
+    return result
+  }
+  const headers = splitRow(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, ''))
+  const rows = lines.slice(1).map(line => {
+    const vals = splitRow(line)
+    const obj = {}
+    headers.forEach((h, i) => { obj[h] = vals[i] || '' })
+    return obj
+  }).filter(row => Object.values(row).some(v => v))
+  return { headers, rows }
+}
+
+function mapCSVField(header) {
+  const map = {
+    'company': 'company', 'company_name': 'company', 'empresa': 'company', 'organization': 'company', 'org': 'company', 'account': 'company', 'account_name': 'company', 'organization_name': 'company',
+    'full_name': 'full_name', 'name': 'full_name', 'nombre': 'full_name', 'contact_name': 'full_name', 'contact': 'full_name', 'person': 'full_name',
+    'first_name': 'first_name', 'last_name': 'last_name',
+    'email': 'email', 'email_address': 'email', 'correo': 'email', 'e_mail': 'email',
+    'title': 'title', 'job_title': 'title', 'position': 'title', 'cargo': 'title', 'titulo': 'title', 'role': 'title',
+    'linkedin_url': 'linkedin_url', 'linkedin': 'linkedin_url', 'profile_url': 'linkedin_url', 'person_linkedin_url': 'linkedin_url',
+    'phone': 'phone', 'phone_number': 'phone', 'telefono': 'phone', 'mobile': 'phone',
+    'country': 'country', 'pais': 'country', 'location': 'country',
+    'industry': 'industry', 'industria': 'industry', 'sector': 'industry',
+    'company_size': 'company_size', 'employees': 'company_size', 'number_of_employees': 'company_size', 'of_employees': 'company_size',
+    'website': 'website', 'company_website': 'website', 'sitio_web': 'website',
+  }
+  return map[header] || null
+}
+
+function CSVImportModal({ existingAccounts, onImport, onClose }) {
+  const [step, setStep] = useState('upload')
+  const [parsed, setParsed] = useState({ headers: [], rows: [] })
+  const [fieldMap, setFieldMap] = useState({})
+  const [preview, setPreview] = useState({ accounts: [], leads: [] })
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef(null)
+
+  const OUR_FIELDS = [
+    { key: '', label: '— Skip —' },
+    { key: 'company', label: 'Company' },
+    { key: 'full_name', label: 'Full Name' },
+    { key: 'first_name', label: 'First Name' },
+    { key: 'last_name', label: 'Last Name' },
+    { key: 'email', label: 'Email' },
+    { key: 'title', label: 'Title / Position' },
+    { key: 'linkedin_url', label: 'LinkedIn URL' },
+    { key: 'phone', label: 'Phone' },
+    { key: 'country', label: 'Country' },
+    { key: 'industry', label: 'Industry' },
+    { key: 'source', label: 'Source' },
+    { key: 'company_size', label: 'Company Size' },
+    { key: 'website', label: 'Website' },
+  ]
+
+  function handleFileSelect(file) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const text = e.target.result
+      processCSV(text)
+    }
+    reader.readAsText(file)
+  }
+
+  function processCSV(text) {
+    const { headers, rows } = parseCSV(text)
+    if (headers.length === 0 || rows.length === 0) return
+    setParsed({ headers, rows })
+    const autoMap = {}
+    headers.forEach(h => {
+      const mapped = mapCSVField(h)
+      if (mapped) autoMap[h] = mapped
+    })
+    setFieldMap(autoMap)
+    setStep('mapping')
+  }
+
+  function generatePreview() {
+    const { rows } = parsed
+    const now = new Date().toISOString()
+    const existingNames = new Set(existingAccounts.map(a => a.name.toLowerCase()))
+    const accountMap = new Map()
+    const leads = []
+
+    rows.forEach(row => {
+      const lead = { id: genId(), stage: 'new', source: 'outbound', created_at: now, updated_at: now, deal_id: null, account_id: '', last_contact_date: '', last_contact_note: '', next_action: '', next_action_date: '', tags: '', notes: '' }
+      let firstName = '', lastName = ''
+      let companyData = { industry: '', country: '', company_size: '', website: '' }
+
+      Object.entries(fieldMap).forEach(([csvHeader, ourField]) => {
+        const val = row[csvHeader] || ''
+        if (!val) return
+        if (ourField === 'first_name') { firstName = val }
+        else if (ourField === 'last_name') { lastName = val }
+        else if (ourField === 'company') { lead.company = val }
+        else if (ourField === 'industry') { lead.industry = val; companyData.industry = val }
+        else if (ourField === 'country') { lead.country = val; companyData.country = val }
+        else if (ourField === 'company_size') { companyData.company_size = val }
+        else if (ourField === 'website') { companyData.website = val }
+        else { lead[ourField] = val }
+      })
+
+      if (!lead.full_name && (firstName || lastName)) {
+        lead.full_name = [firstName, lastName].filter(Boolean).join(' ')
+      }
+      if (!lead.full_name && !lead.company) return
+
+      const companyName = lead.company || ''
+      if (companyName && !existingNames.has(companyName.toLowerCase()) && !accountMap.has(companyName.toLowerCase())) {
+        accountMap.set(companyName.toLowerCase(), {
+          id: genId(), name: companyName,
+          industry: companyData.industry, country: companyData.country,
+          website: companyData.website, company_size: companyData.company_size,
+          status: 'target', notes: '', created_at: now, updated_at: now,
+        })
+      }
+      leads.push(lead)
+    })
+
+    setPreview({ accounts: [...accountMap.values()], leads })
+    setStep('preview')
+  }
+
+  function handleConfirmImport() {
+    onImport(preview.accounts, preview.leads)
+    setStep('done')
+  }
+
+  const hasCompanyMapping = Object.values(fieldMap).includes('company')
+  const hasNameMapping = Object.values(fieldMap).includes('full_name') || (Object.values(fieldMap).includes('first_name') && Object.values(fieldMap).includes('last_name'))
+
+  return (
+    <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 700, padding: 28, maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 18 }}>Import CSV</div>
+            <div style={{ fontSize: 13, color: '#64748b' }}>Import leads and auto-create accounts from a CSV file</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>x</button>
+        </div>
+
+        {/* Step indicator */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
+          {['Upload', 'Map Fields', 'Preview & Confirm'].map((label, i) => {
+            const stepIdx = ['upload', 'mapping', 'preview'].indexOf(step)
+            const isActive = i === stepIdx
+            const isDone = i < stepIdx || step === 'done'
+            return (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{
+                  width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 12, fontWeight: 600,
+                  background: isDone ? '#22c55e' : isActive ? '#6366f1' : '#e2e8f0',
+                  color: isDone || isActive ? '#fff' : '#94a3b8',
+                }}>{isDone ? '✓' : i + 1}</div>
+                <span style={{ fontSize: 13, fontWeight: isActive ? 600 : 400, color: isActive ? '#1e293b' : '#94a3b8' }}>{label}</span>
+                {i < 2 && <span style={{ color: '#e2e8f0', margin: '0 4px' }}>→</span>}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Step 1: Upload */}
+        {step === 'upload' && (
+          <div>
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFileSelect(e.dataTransfer.files[0]) }}
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                border: '2px dashed ' + (dragOver ? '#6366f1' : '#e2e8f0'),
+                borderRadius: 12, padding: 48, textAlign: 'center', cursor: 'pointer',
+                background: dragOver ? '#f5f3ff' : '#fafafa', transition: 'all 0.2s',
+              }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>+</div>
+              <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>Drop your CSV file here</div>
+              <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>or click to browse</div>
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>Supports: Apollo exports, LinkedIn Sales Nav, or any CSV with contact data</div>
+              <input ref={fileInputRef} type="file" accept=".csv,.txt" style={{ display: 'none' }}
+                onChange={(e) => handleFileSelect(e.target.files[0])} />
+            </div>
+            <div style={{ marginTop: 16, padding: 16, background: '#f8fafc', borderRadius: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Expected columns:</div>
+              <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
+                <strong>Required:</strong> company, full_name (or first_name + last_name)<br/>
+                <strong>Optional:</strong> email, title, linkedin_url, phone, country, industry, source
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: Field Mapping */}
+        {step === 'mapping' && (
+          <div>
+            <div style={{ marginBottom: 16, padding: 12, background: '#f0fdf4', borderRadius: 8, fontSize: 13, color: '#16a34a' }}>
+              Found <strong>{parsed.rows.length}</strong> rows with <strong>{parsed.headers.length}</strong> columns
+            </div>
+            <div style={{ marginBottom: 16, fontSize: 13, color: '#64748b' }}>
+              Map your CSV columns to the correct fields. Auto-detected mappings are pre-filled.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '8px 12px', alignItems: 'center', marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase' }}>CSV Column</div>
+              <div></div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase' }}>Maps To</div>
+              {parsed.headers.map(h => {
+                const sampleVal = parsed.rows[0]?.[h] || '—'
+                return [
+                  <div key={h + '_label'} style={{ fontSize: 13, fontWeight: 500, padding: '6px 10px', background: '#f8fafc', borderRadius: 6, fontFamily: 'monospace' }}>
+                    {h}
+                    <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'sans-serif', marginTop: 2 }}>
+                      e.g. &quot;{sampleVal.length > 30 ? sampleVal.slice(0, 30) + '...' : sampleVal}&quot;
+                    </div>
+                  </div>,
+                  <span key={h + '_arrow'} style={{ color: '#94a3b8' }}>→</span>,
+                  <select key={h + '_select'}
+                    value={fieldMap[h] || ''}
+                    onChange={(e) => setFieldMap(f => ({ ...f, [h]: e.target.value }))}
+                    style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: fieldMap[h] ? '#f0fdf4' : '#fff' }}>
+                    {OUR_FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+                  </select>,
+                ]
+              })}
+            </div>
+            {!hasCompanyMapping && (
+              <div style={{ padding: 10, background: '#fffbeb', borderRadius: 6, fontSize: 12, color: '#b45309', marginBottom: 12 }}>
+                No &quot;Company&quot; column mapped — accounts won&apos;t be auto-created
+              </div>
+            )}
+            {!hasNameMapping && (
+              <div style={{ padding: 10, background: '#fffbeb', borderRadius: 6, fontSize: 12, color: '#b45309', marginBottom: 12 }}>
+                No name column mapped — leads need at least a name
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <button onClick={() => setStep('upload')} style={btnSecondary}>Back</button>
+              <button onClick={generatePreview} style={btnPrimary} disabled={!hasNameMapping && !hasCompanyMapping}>
+                Preview Import
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 3: Preview */}
+        {step === 'preview' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+              <div style={{ padding: 16, background: '#f5f3ff', borderRadius: 8, textAlign: 'center' }}>
+                <div style={{ fontSize: 28, fontWeight: 700, color: '#6366f1' }}>{preview.accounts.length}</div>
+                <div style={{ fontSize: 13, color: '#64748b' }}>New accounts to create</div>
+              </div>
+              <div style={{ padding: 16, background: '#eff6ff', borderRadius: 8, textAlign: 'center' }}>
+                <div style={{ fontSize: 28, fontWeight: 700, color: '#3b82f6' }}>{preview.leads.length}</div>
+                <div style={{ fontSize: 13, color: '#64748b' }}>Leads to import</div>
+              </div>
+            </div>
+            {preview.accounts.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>New Accounts</div>
+                <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc' }}>
+                        <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Company</th>
+                        <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Country</th>
+                        <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Industry</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.accounts.map(a => (
+                        <tr key={a.id} style={{ borderTop: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '6px 10px' }}>{a.name}</td>
+                          <td style={{ padding: '6px 10px', color: '#64748b' }}>{a.country || '—'}</td>
+                          <td style={{ padding: '6px 10px', color: '#64748b' }}>{a.industry || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Leads Preview (first 10)</div>
+              <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: '#f8fafc' }}>
+                      <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Name</th>
+                      <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Company</th>
+                      <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Title</th>
+                      <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>Email</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.leads.slice(0, 10).map(l => (
+                      <tr key={l.id} style={{ borderTop: '1px solid #f1f5f9' }}>
+                        <td style={{ padding: '6px 10px' }}>{l.full_name || '—'}</td>
+                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{l.company || '—'}</td>
+                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{l.title || '—'}</td>
+                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{l.email || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {preview.leads.length > 10 && (
+                <div style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center', marginTop: 6 }}>
+                  ...and {preview.leads.length - 10} more leads
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <button onClick={() => setStep('mapping')} style={btnSecondary}>Back</button>
+              <button onClick={handleConfirmImport}
+                style={{ ...btnPrimary, background: '#22c55e', padding: '10px 24px', fontSize: 15 }}>
+                Import {preview.leads.length} Leads + {preview.accounts.length} Accounts
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 4: Done */}
+        {step === 'done' && (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>&#10003;</div>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 8 }}>Import Complete!</div>
+            <div style={{ fontSize: 14, color: '#64748b', marginBottom: 24 }}>
+              Created {preview.accounts.length} accounts and {preview.leads.length} leads
+            </div>
+            <button onClick={onClose} style={{ ...btnPrimary, padding: '10px 32px' }}>Done</button>
+          </div>
+        )}
       </div>
     </div>
   )
