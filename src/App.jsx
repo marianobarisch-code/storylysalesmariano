@@ -3911,7 +3911,7 @@ function getPeriods(view) {
   const now = new Date()
   const periods = []
   if (view === 'daily') {
-    for (let i = 6; i >= 0; i--) {
+    for (let i = 13; i >= 0; i--) {
       const d = new Date(now)
       d.setDate(d.getDate() - i)
       d.setHours(0, 0, 0, 0)
@@ -3920,7 +3920,7 @@ function getPeriods(view) {
       periods.push({ start: d, end, label: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) })
     }
   } else if (view === 'weekly') {
-    for (let i = 7; i >= 0; i--) {
+    for (let i = 25; i >= 0; i--) {
       const ref = new Date(now)
       ref.setDate(ref.getDate() - i * 7)
       const start = getWeekStart(ref)
@@ -3929,7 +3929,7 @@ function getPeriods(view) {
       periods.push({ start, end, label })
     }
   } else {
-    for (let i = 5; i >= 0; i--) {
+    for (let i = 11; i >= 0; i--) {
       const ref = new Date(now)
       ref.setMonth(ref.getMonth() - i)
       const start = getMonthStart(ref)
@@ -3943,36 +3943,66 @@ function getPeriods(view) {
 // Stages in order for funnel calculation
 const LEAD_FUNNEL_STAGES = ['new', 'researching', 'engaging', 'nurturing', 'qualified', 'converted']
 
-function calcPeriodStats(leads, accounts, period) {
-  const periodLeads = leads.filter(l => {
-    const d = new Date(l.created_at)
-    return d >= period.start && d <= period.end
-  })
-  const periodAccounts = accounts.filter(a => {
-    const d = new Date(a.created_at)
-    return d >= period.start && d <= period.end
-  })
-  const total = periodLeads.length
-  if (total === 0) return { total: 0, accounts: periodAccounts.length, acceptance: 0, response: 0, meeting: 0, qualified: 0, converted: 0 }
+// Activity types that count as a real first-touch message (not connection req, not warm-up)
+const MESSAGE_OUTBOUND_TYPES = ['dm_sent', 'inmail_sent', 'email_sent', 'whatsapp_sent', 'call_made']
+// Activity types that count as a real inbound response (connection_accepted is passive, excluded)
+const RESPONSE_INBOUND_TYPES = ['dm_received', 'inmail_received', 'email_received', 'whatsapp_received', 'call_received']
 
-  // Acceptance = moved past 'new' (researching+)
-  const acceptance = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 1 || l.stage === 'not_interested').length
-  // Response = moved to engaging+
-  const response = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 2).length
-  // Meeting = moved to nurturing+
-  const meeting = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 3).length
-  // Qualified
-  const qualified = periodLeads.filter(l => LEAD_FUNNEL_STAGES.indexOf(l.stage) >= 4).length
-  // Converted to opportunity
+function leadActs(lead) { return lead.activities || [] }
+function leadHasType(lead, type) { return leadActs(lead).some(a => a.type === type) }
+function leadHasAnyType(lead, types) { return leadActs(lead).some(a => types.includes(a.type)) }
+
+// Date of the lead's first real outbound message (null if never messaged)
+function firstMessageDate(lead) {
+  const dates = leadActs(lead).filter(a => MESSAGE_OUTBOUND_TYPES.includes(a.type)).map(a => new Date(a.date)).sort((x, y) => x - y)
+  return dates.length ? dates[0] : null
+}
+
+function calcPeriodStats(leads, accounts, deals, period) {
+  const inPeriod = (dateStr) => { const d = new Date(dateStr); return d >= period.start && d <= period.end }
+
+  // Cohort = leads created in this period
+  const periodLeads = leads.filter(l => inPeriod(l.created_at))
+  // Prospecting accounts only (no open deal + not a customer) created in this period
+  const periodAccounts = accounts.filter(a => {
+    if (!inPeriod(a.created_at)) return false
+    const hasOpenDeal = (deals || []).some(d => d.account_id === a.id && d.deal_status === 'open')
+    return !hasOpenDeal && a.status !== 'customer'
+  })
+
+  // First messages sent = leads whose FIRST real outbound message happened in this period
+  // (productivity metric — counts the people you started messaging, regardless of when added)
+  const firstMessages = leads.filter(l => {
+    const fmd = firstMessageDate(l)
+    return fmd && fmd >= period.start && fmd <= period.end
+  }).length
+
+  const total = periodLeads.length
+
+  // ---- Conversion rates: activity-driven, measured over this period's cohort ----
+  // Denominators are the relevant funnel step, so rates reflect REAL logged events.
+  const connSent  = periodLeads.filter(l => leadHasType(l, 'connection_sent')).length
+  const connAcc   = periodLeads.filter(l => leadHasType(l, 'connection_accepted')).length
+  const msgSent   = periodLeads.filter(l => leadHasAnyType(l, MESSAGE_OUTBOUND_TYPES)).length
+  const responded = periodLeads.filter(l => leadHasAnyType(l, RESPONSE_INBOUND_TYPES)).length
+  const metWith   = periodLeads.filter(l => leadHasType(l, 'meeting_held')).length
+  const qualified = periodLeads.filter(l => ['qualified', 'converted'].includes(l.stage)).length
   const converted = periodLeads.filter(l => l.stage === 'converted').length
 
+  const pct = (num, den) => den > 0 ? Math.round((num / den) * 100) : null
+
   return {
-    total, accounts: periodAccounts.length,
-    acceptance: Math.round((acceptance / total) * 100),
-    response: Math.round((response / total) * 100),
-    meeting: Math.round((meeting / total) * 100),
-    qualified: Math.round((qualified / total) * 100),
-    converted: Math.round((converted / total) * 100),
+    total,
+    accounts: periodAccounts.length,
+    firstMessages,
+    // raw counts (for tooltips / context)
+    connSent, connAcc, msgSent, responded, metWith,
+    // rates (null when denominator is 0 → shown as —)
+    acceptance: pct(connAcc, connSent),
+    response: pct(responded, msgSent),
+    meeting: pct(metWith, responded),
+    qualified: total > 0 ? Math.round((qualified / total) * 100) : null,
+    converted: total > 0 ? Math.round((converted / total) * 100) : null,
   }
 }
 
@@ -3981,14 +4011,22 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
   const [showGoals, setShowGoals] = useState(false)
   const [goals, setGoals] = useState({
     leads_per_week: settings.goal_leads_per_week || 20,
+    messages_per_week: settings.goal_messages_per_week || 15,
     accounts_per_week: settings.goal_accounts_per_week || 5,
     acceptance_rate: settings.goal_acceptance_rate || 30,
     response_rate: settings.goal_response_rate || 15,
     meeting_rate: settings.goal_meeting_rate || 10,
   })
 
-  const periods = getPeriods(view)
-  const periodStats = periods.map(p => ({ ...p, stats: calcPeriodStats(leads, accounts, p) }))
+  const allPeriods = getPeriods(view).map(p => ({ ...p, stats: calcPeriodStats(leads, accounts, deals, p) }))
+
+  // Hide leading empty periods — only show from the first period with activity onward.
+  // Current period (last) is always kept even if empty.
+  const hasActivity = (p) => p.stats.total > 0 || p.stats.accounts > 0 || p.stats.firstMessages > 0
+  const firstActiveIdx = allPeriods.findIndex(hasActivity)
+  const periodStats = firstActiveIdx === -1
+    ? allPeriods.slice(-1)
+    : allPeriods.slice(firstActiveIdx)
 
   // Current period (last one)
   const current = periodStats[periodStats.length - 1]
@@ -3997,6 +4035,7 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
   function saveGoals() {
     onUpdateSettings({
       goal_leads_per_week: goals.leads_per_week,
+      goal_messages_per_week: goals.messages_per_week,
       goal_accounts_per_week: goals.accounts_per_week,
       goal_acceptance_rate: goals.acceptance_rate,
       goal_response_rate: goals.response_rate,
@@ -4022,12 +4061,15 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
     )
   }
 
-  function RateCard({ label, value, prev, icon }) {
-    const diff = prev != null ? value - prev : null
+  function RateCard({ label, value, prev, icon, sub }) {
+    const diff = (value != null && prev != null) ? value - prev : null
     return (
       <div style={{ ...cardStyle, padding: 16, textAlign: 'center' }}>
         <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>{icon} {label}</div>
-        <div style={{ fontSize: 28, fontWeight: 700, color: '#1e293b' }}>{value}%</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: value == null ? '#cbd5e1' : '#1e293b' }}>
+          {value == null ? '—' : value + '%'}
+        </div>
+        {sub && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{sub}</div>}
         {diff != null && diff !== 0 && (
           <div style={{ fontSize: 12, color: diff > 0 ? '#22c55e' : '#ef4444', marginTop: 2 }}>
             {diff > 0 ? '+' : ''}{diff}% vs prev
@@ -4064,20 +4106,21 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
         <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 12 }}>
           Current Period: {current.label}
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
           <GoalProgress label="Leads Added" value={current.stats.total} goal={view === 'daily' ? Math.ceil(goals.leads_per_week / 5) : view === 'weekly' ? goals.leads_per_week : goals.leads_per_week * 4} />
+          <GoalProgress label="First Messages Sent" value={current.stats.firstMessages} goal={view === 'daily' ? Math.ceil(goals.messages_per_week / 5) : view === 'weekly' ? goals.messages_per_week : goals.messages_per_week * 4} />
           <GoalProgress label="Accounts Added" value={current.stats.accounts} goal={view === 'daily' ? Math.ceil(goals.accounts_per_week / 5) : view === 'weekly' ? goals.accounts_per_week : goals.accounts_per_week * 4} />
-          <GoalProgress label="Acceptance Rate" value={current.stats.acceptance} goal={goals.acceptance_rate} suffix="%" />
         </div>
       </div>
 
       {/* Conversion funnel rates */}
       <div style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 12 }}>Conversion Rates (leads created in this period)</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
-          <RateCard label="Acceptance" value={current.stats.acceptance} prev={previous?.stats.acceptance} icon="" />
-          <RateCard label="Response" value={current.stats.response} prev={previous?.stats.response} icon="" />
-          <RateCard label="Meeting" value={current.stats.meeting} prev={previous?.stats.meeting} icon="" />
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b', marginBottom: 4 }}>Conversion Rates (leads sourced in this period)</div>
+        <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 12 }}>Based on activities you log. Shows "—" until there's data at that step.</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+          <RateCard label="Acceptance" value={current.stats.acceptance} prev={previous?.stats.acceptance} icon="" sub={`${current.stats.connAcc}/${current.stats.connSent} accepted`} />
+          <RateCard label="Response" value={current.stats.response} prev={previous?.stats.response} icon="" sub={`${current.stats.responded}/${current.stats.msgSent} replied`} />
+          <RateCard label="Meeting" value={current.stats.meeting} prev={previous?.stats.meeting} icon="" sub={`${current.stats.metWith} held`} />
           <RateCard label="Qualified" value={current.stats.qualified} prev={previous?.stats.qualified} icon="" />
           <RateCard label="Converted" value={current.stats.converted} prev={previous?.stats.converted} icon="" />
         </div>
@@ -4094,6 +4137,7 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
               <tr style={{ background: '#f8fafc' }}>
                 <th style={{ padding: '10px 16px', textAlign: 'left', fontWeight: 600, whiteSpace: 'nowrap' }}>Period</th>
                 <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Leads</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Messages</th>
                 <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Accounts</th>
                 <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Acceptance</th>
                 <th style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>Response</th>
@@ -4112,12 +4156,13 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
                       {p.label} {isLast && <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 600 }}>CURRENT</span>}
                     </td>
                     <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600 }}>{s.total}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 600, color: s.firstMessages > 0 ? '#6366f1' : '#cbd5e1' }}>{s.firstMessages}</td>
                     <td style={{ padding: '10px 12px', textAlign: 'center' }}>{s.accounts}</td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.acceptance + '%' : '—'}</td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.response + '%' : '—'}</td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.meeting + '%' : '—'}</td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.qualified + '%' : '—'}</td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.total > 0 ? '#1e293b' : '#cbd5e1' }}>{s.total > 0 ? s.converted + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.acceptance != null ? '#1e293b' : '#cbd5e1' }}>{s.acceptance != null ? s.acceptance + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.response != null ? '#1e293b' : '#cbd5e1' }}>{s.response != null ? s.response + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.meeting != null ? '#1e293b' : '#cbd5e1' }}>{s.meeting != null ? s.meeting + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.qualified != null ? '#1e293b' : '#cbd5e1' }}>{s.qualified != null ? s.qualified + '%' : '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center', color: s.converted != null ? '#1e293b' : '#cbd5e1' }}>{s.converted != null ? s.converted + '%' : '—'}</td>
                   </tr>
                 )
               })}
@@ -4162,6 +4207,7 @@ function AnalyticsTab({ leads, accounts, deals, settings, onUpdateSettings }) {
             <div style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Set your weekly prospecting targets</div>
             {[
               { key: 'leads_per_week', label: 'Leads per week', type: 'number' },
+              { key: 'messages_per_week', label: 'First messages sent per week', type: 'number' },
               { key: 'accounts_per_week', label: 'Accounts per week', type: 'number' },
               { key: 'acceptance_rate', label: 'Target acceptance rate (%)', type: 'number' },
               { key: 'response_rate', label: 'Target response rate (%)', type: 'number' },
