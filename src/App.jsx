@@ -147,6 +147,9 @@ const ACTIVITY_TYPES = {
     { key: 'dm_received',         label: 'DM received',               direction: 'inbound' },
     { key: 'inmail_sent',         label: 'InMail sent',               direction: 'outbound' },
     { key: 'inmail_received',     label: 'InMail received',           direction: 'inbound' },
+    { key: 'post_comment',        label: 'Commented on their post',   direction: 'outbound', warmup: true },
+    { key: 'post_like',           label: 'Liked their post',          direction: 'outbound', warmup: true },
+    { key: 'post_repost',         label: 'Reposted their content',    direction: 'outbound', warmup: true },
   ],
   email: [
     { key: 'email_sent',     label: 'Email sent',     direction: 'outbound' },
@@ -185,6 +188,12 @@ function activityDirection(channel, type) {
   const types = ACTIVITY_TYPES[channel] || []
   const found = types.find(t => t.key === type)
   return found ? found.direction : 'neutral'
+}
+
+function isWarmupActivity(channel, type) {
+  const types = ACTIVITY_TYPES[channel] || []
+  const found = types.find(t => t.key === type)
+  return found ? !!found.warmup : false
 }
 
 function daysAgoLabel(dateStr) {
@@ -1006,8 +1015,9 @@ export default function App() {
             updates.stage = 'nurturing'
           }
         }
-        // Auto-progress: first outbound contact → engaging
-        if (dir === 'outbound' && l.stage === 'new') {
+        // Auto-progress: first outbound contact → engaging (warm-up actions don't count)
+        const isWarmup = isWarmupActivity(activity.channel, activity.type)
+        if (dir === 'outbound' && l.stage === 'new' && !isWarmup) {
           updates.stage = 'engaging'
         }
         return { ...l, ...updates }
