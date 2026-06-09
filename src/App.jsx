@@ -206,6 +206,11 @@ function daysAgoLabel(dateStr) {
 
 // ---- Cadence Engine ----
 // Calculates the suggested next action based on lead activities and state
+// Two modes: PRE-RESPONSE (touchpoint-based outreach) and NURTURING (post-response momentum)
+
+const WARMUP_TYPES = ['post_comment', 'post_like', 'post_repost']
+const PASSIVE_INBOUND = ['connection_accepted']
+const MAX_TOUCHPOINTS = 4
 
 function calculateCadence(lead) {
   const activities = lead.activities || []
@@ -213,7 +218,6 @@ function calculateCadence(lead) {
 
   // Helper: check if a specific activity type exists
   const has = (ch, type) => activities.some(a => a.channel === ch && a.type === type)
-  const hasAny = (ch, types) => types.some(t => has(ch, t))
 
   // Helper: get the date of the last activity of a specific type
   const lastDate = (ch, type) => {
@@ -221,27 +225,118 @@ function calculateCadence(lead) {
     return found.length > 0 ? found[0].date : null
   }
 
-  // Count activities of a type
-  const count = (ch, type) => activities.filter(a => a.channel === ch && a.type === type).length
-
-  // Has any real inbound response? (connection_accepted is passive, doesn't count)
-  const PASSIVE_TYPES = ['connection_accepted']
-  const hasResponse = activities.some(a => {
-    const dir = a.direction || activityDirection(a.channel, a.type)
-    return dir === 'inbound' && !PASSIVE_TYPES.includes(a.type)
-  })
-
-  // If lead already has a real response, no cadence suggestion needed (they're in conversation)
-  if (hasResponse || ['nurturing', 'qualified', 'converted', 'not_interested', 'unreachable'].includes(lead.stage)) {
-    return null
-  }
-
   // Calculate days since a date
   const daysSince = (dateStr) => dateStr ? Math.floor((Date.now() - new Date(dateStr)) / 86400000) : null
 
-  // ---- CADENCE LOGIC ----
+  // Has any real inbound response? (connection_accepted is passive, doesn't count)
+  const hasResponse = activities.some(a => {
+    const dir = a.direction || activityDirection(a.channel, a.type)
+    return dir === 'inbound' && !PASSIVE_INBOUND.includes(a.type)
+  })
 
-  // Step 1: No activities yet → Send LinkedIn connection
+  // Dead stages — no cadence
+  if (['qualified', 'converted', 'not_interested', 'unreachable'].includes(lead.stage)) {
+    return null
+  }
+
+  // ==============================
+  // NURTURING CADENCE (post-response)
+  // Goal: maintain momentum → build rapport → get meeting
+  // ==============================
+  if (hasResponse || lead.stage === 'nurturing') {
+    const sorted = [...activities].sort((a, b) => new Date(b.date) - new Date(a.date))
+    const lastAct = sorted[0]
+    const daysSinceLast = lastAct ? daysSince(lastAct.date) : null
+
+    // Find the main conversation channel (most recent inbound real response)
+    const lastInbound = sorted.find(a => {
+      const dir = a.direction || activityDirection(a.channel, a.type)
+      return dir === 'inbound' && !PASSIVE_INBOUND.includes(a.type)
+    })
+    const mainChannel = lastInbound ? lastInbound.channel : 'linkedin'
+
+    // Count real exchanges (non-warmup outbound + real inbound)
+    const realOutbound = activities.filter(a => {
+      const dir = a.direction || activityDirection(a.channel, a.type)
+      return dir === 'outbound' && !WARMUP_TYPES.includes(a.type)
+    }).length
+    const realInbound = activities.filter(a => {
+      const dir = a.direction || activityDirection(a.channel, a.type)
+      return dir === 'inbound' && !PASSIVE_INBOUND.includes(a.type)
+    }).length
+
+    // Urgency based on days since last interaction
+    const nurtureUrgency = (d) => {
+      if (d === null) return 'normal'
+      if (d >= 4) return 'overdue'
+      if (d >= 2) return 'due_soon'
+      return 'normal'
+    }
+
+    // After enough back-and-forth, suggest meeting
+    if (realOutbound >= 2 && realInbound >= 2) {
+      return {
+        action: 'Propose a meeting — enough rapport built',
+        channel: mainChannel,
+        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        waitDays: 0,
+        dueDate: null,
+        step: 3,
+        totalSteps: 3,
+        urgency: nurtureUrgency(daysSinceLast),
+      }
+    }
+
+    // First reply: keep momentum going
+    const lastDir = lastAct ? (lastAct.direction || activityDirection(lastAct.channel, lastAct.type)) : null
+
+    if (lastDir === 'inbound') {
+      // They wrote last — your turn to reply
+      return {
+        action: daysSinceLast >= 3 ? 'Reply now — conversation cooling!' : 'Reply to keep momentum',
+        channel: mainChannel,
+        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        waitDays: 0,
+        dueDate: null,
+        step: Math.min(realOutbound + 1, 2),
+        totalSteps: 3,
+        urgency: nurtureUrgency(daysSinceLast),
+      }
+    }
+
+    // You wrote last — waiting for their reply, but don't let it die
+    if (daysSinceLast !== null && daysSinceLast >= 3) {
+      return {
+        action: 'Follow up — re-engage the conversation',
+        channel: mainChannel,
+        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        waitDays: 3,
+        dueDate: lastAct ? new Date(new Date(lastAct.date).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+        step: Math.min(realOutbound + 1, 2),
+        totalSteps: 3,
+        urgency: 'overdue',
+      }
+    }
+
+    return {
+      action: 'Waiting for their reply',
+      channel: null,
+      type: null,
+      waitDays: 3,
+      dueDate: lastAct ? new Date(new Date(lastAct.date).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+      step: Math.min(realOutbound + 1, 2),
+      totalSteps: 3,
+      urgency: 'waiting',
+    }
+  }
+
+  // ==============================
+  // PRE-RESPONSE CADENCE (touchpoint-based outreach)
+  // Touchpoints = DMs + warm-ups + emails (NOT connection_sent)
+  // After MAX_TOUCHPOINTS without response → dead
+  // ==============================
+
+  // Step 0: No connection yet → Send LinkedIn connection
   if (!has('linkedin', 'connection_sent')) {
     return {
       action: 'Send LinkedIn connection request',
@@ -249,171 +344,176 @@ function calculateCadence(lead) {
       type: 'connection_sent',
       waitDays: 0,
       dueDate: null,
-      step: 1,
-      totalSteps: 4,
+      step: 0,
+      totalSteps: MAX_TOUCHPOINTS,
       urgency: 'normal',
     }
   }
 
-  // Step 2: LinkedIn sent, check if accepted
   const connSentDate = lastDate('linkedin', 'connection_sent')
   const daysSinceConn = daysSince(connSentDate)
+  const connAccepted = has('linkedin', 'connection_accepted')
 
-  if (has('linkedin', 'connection_accepted')) {
-    // LinkedIn path — they accepted
-    const dmCount = count('linkedin', 'dm_sent')
+  // Count touchpoints: all outbound EXCEPT connection_sent itself
+  const touchpoints = activities.filter(a => {
+    if (a.type === 'connection_sent') return false
+    const dir = a.direction || activityDirection(a.channel, a.type)
+    return dir === 'outbound'
+  }).sort((a, b) => new Date(b.date) - new Date(a.date))
+  const tpCount = touchpoints.length
 
-    if (dmCount === 0) {
-      // First DM
+  // Last touchpoint info
+  const lastTp = touchpoints[0] || null
+  const daysSinceLastTp = lastTp ? daysSince(lastTp.date) : null
+  const lastWasWarmup = lastTp ? WARMUP_TYPES.includes(lastTp.type) : false
+  const WAIT_DAYS = 3
+
+  // Dead after MAX_TOUCHPOINTS
+  if (tpCount >= MAX_TOUCHPOINTS) {
+    return {
+      action: connAccepted ? 'No response after ' + tpCount + ' touchpoints' : 'Unreachable — no response after ' + tpCount + ' attempts',
+      channel: null,
+      type: null,
+      waitDays: 0,
+      dueDate: null,
+      step: MAX_TOUCHPOINTS,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency: 'dead',
+      deadType: connAccepted ? 'not_interested' : 'unreachable',
+    }
+  }
+
+  // ---- ACCEPTED PATH ----
+  if (connAccepted) {
+    // First touchpoint: always a DM intro
+    if (tpCount === 0) {
       return {
         action: 'Send LinkedIn DM (intro message)',
         channel: 'linkedin',
         type: 'dm_sent',
         waitDays: 0,
         dueDate: null,
-        step: 2,
-        totalSteps: 4,
+        step: tpCount + 1,
+        totalSteps: MAX_TOUCHPOINTS,
         urgency: 'normal',
       }
     }
 
-    const lastDmDate = lastDate('linkedin', 'dm_sent')
-    const daysSinceLastDm = daysSince(lastDmDate)
+    // Subsequent touchpoints: alternate between warm-up and DM
+    const dueDate = lastTp ? new Date(new Date(lastTp.date).getTime() + WAIT_DAYS * 86400000).toISOString().slice(0, 10) : null
+    const dueInDays = daysSinceLastTp !== null ? WAIT_DAYS - daysSinceLastTp : WAIT_DAYS
+    const urgency = dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting'
 
-    if (dmCount === 1) {
-      const dueInDays = 3 - daysSinceLastDm
+    if (lastWasWarmup) {
       return {
-        action: 'Send follow-up DM #2',
+        action: 'Send follow-up DM',
         channel: 'linkedin',
         type: 'dm_sent',
-        waitDays: 3,
-        dueDate: lastDmDate ? new Date(new Date(lastDmDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
-        step: 3,
-        totalSteps: 4,
-        urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+        waitDays: WAIT_DAYS,
+        dueDate,
+        step: tpCount + 1,
+        totalSteps: MAX_TOUCHPOINTS,
+        urgency,
       }
     }
 
-    if (dmCount === 2) {
-      const dueInDays = 4 - daysSinceLastDm
-      return {
-        action: hasEmail ? 'Send final DM or try email' : 'Send final DM (last attempt)',
-        channel: 'linkedin',
-        type: 'dm_sent',
-        waitDays: 4,
-        dueDate: lastDmDate ? new Date(new Date(lastDmDate).getTime() + 4 * 86400000).toISOString().slice(0, 10) : null,
-        step: 4,
-        totalSteps: 4,
-        urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
-      }
-    }
-
-    if (dmCount >= 3) {
-      return {
-        action: 'No response after 3 DMs',
-        channel: null,
-        type: null,
-        waitDays: 0,
-        dueDate: null,
-        step: 4,
-        totalSteps: 4,
-        urgency: 'dead',
-        deadType: 'not_interested',
-      }
+    return {
+      action: 'Interact with their post or send follow-up DM',
+      channel: 'linkedin',
+      type: null,
+      waitDays: WAIT_DAYS,
+      dueDate,
+      step: tpCount + 1,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency,
     }
   }
 
-  // LinkedIn NOT accepted path
-  if (daysSinceConn !== null && daysSinceConn >= 3) {
-    // 3+ days since connection, not accepted
-    if (hasEmail) {
-      // Email fallback path
-      const emailCount = count('email', 'email_sent')
+  // ---- NOT ACCEPTED PATH ----
 
-      if (emailCount === 0) {
-        return {
-          action: 'LinkedIn not accepted — send intro email',
-          channel: 'email',
-          type: 'email_sent',
-          waitDays: 0,
-          dueDate: null,
-          step: 2,
-          totalSteps: 4,
-          urgency: 'normal',
-        }
-      }
-
-      const lastEmailDate = lastDate('email', 'email_sent')
-      const daysSinceLastEmail = daysSince(lastEmailDate)
-
-      if (emailCount === 1) {
-        const dueInDays = 3 - daysSinceLastEmail
-        return {
-          action: 'Send follow-up email #2',
-          channel: 'email',
-          type: 'email_sent',
-          waitDays: 3,
-          dueDate: lastEmailDate ? new Date(new Date(lastEmailDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
-          step: 3,
-          totalSteps: 4,
-          urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
-        }
-      }
-
-      if (emailCount === 2) {
-        const dueInDays = 4 - daysSinceLastEmail
-        return {
-          action: 'Send final email #3 (last attempt)',
-          channel: 'email',
-          type: 'email_sent',
-          waitDays: 4,
-          dueDate: lastEmailDate ? new Date(new Date(lastEmailDate).getTime() + 4 * 86400000).toISOString().slice(0, 10) : null,
-          step: 4,
-          totalSteps: 4,
-          urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
-        }
-      }
-
-      if (emailCount >= 3) {
-        return {
-          action: 'No response after 3 emails — unreachable',
-          channel: null,
-          type: null,
-          waitDays: 0,
-          dueDate: null,
-          step: 4,
-          totalSteps: 4,
-          urgency: 'dead',
-          deadType: 'unreachable',
-        }
-      }
-    } else {
-      // No email, LinkedIn not accepted
-      return {
-        action: 'Unreachable — no email, LinkedIn not accepted',
-        channel: null,
-        type: null,
-        waitDays: 0,
-        dueDate: null,
-        step: 2,
-        totalSteps: 4,
-        urgency: 'dead',
-        deadType: 'unreachable',
-      }
+  // Still within 3-day window — wait
+  if (daysSinceConn !== null && daysSinceConn < 3) {
+    return {
+      action: 'Waiting for LinkedIn connection to be accepted',
+      channel: null,
+      type: null,
+      waitDays: 3,
+      dueDate: connSentDate ? new Date(new Date(connSentDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+      step: 0,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency: 'waiting',
     }
   }
 
-  // LinkedIn sent less than 3 days ago — waiting for acceptance
-  const dueInDays = 3 - daysSinceConn
+  // 3+ days, not accepted
+  if (!hasEmail) {
+    // Can still warm up on public posts
+    if (tpCount === 0) {
+      return {
+        action: 'Interact with their post to get noticed',
+        channel: 'linkedin',
+        type: null,
+        waitDays: 0,
+        dueDate: null,
+        step: tpCount + 1,
+        totalSteps: MAX_TOUCHPOINTS,
+        urgency: 'normal',
+      }
+    }
+    const dueDate = lastTp ? new Date(new Date(lastTp.date).getTime() + WAIT_DAYS * 86400000).toISOString().slice(0, 10) : null
+    const dueInDays = daysSinceLastTp !== null ? WAIT_DAYS - daysSinceLastTp : WAIT_DAYS
+    return {
+      action: tpCount < MAX_TOUCHPOINTS - 1 ? 'Keep interacting — comment or like posts' : 'Last attempt — engage on their content',
+      channel: 'linkedin',
+      type: null,
+      waitDays: WAIT_DAYS,
+      dueDate,
+      step: tpCount + 1,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+    }
+  }
+
+  // Has email — email + warm-up touchpoint path
+  if (tpCount === 0) {
+    return {
+      action: 'LinkedIn not accepted — send intro email',
+      channel: 'email',
+      type: 'email_sent',
+      waitDays: 0,
+      dueDate: null,
+      step: tpCount + 1,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency: 'normal',
+    }
+  }
+
+  const dueDate = lastTp ? new Date(new Date(lastTp.date).getTime() + WAIT_DAYS * 86400000).toISOString().slice(0, 10) : null
+  const dueInDays = daysSinceLastTp !== null ? WAIT_DAYS - daysSinceLastTp : WAIT_DAYS
+  const urgency = dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting'
+
+  if (lastWasWarmup) {
+    return {
+      action: 'Send follow-up email',
+      channel: 'email',
+      type: 'email_sent',
+      waitDays: WAIT_DAYS,
+      dueDate,
+      step: tpCount + 1,
+      totalSteps: MAX_TOUCHPOINTS,
+      urgency,
+    }
+  }
+
   return {
-    action: 'Waiting for LinkedIn connection to be accepted',
-    channel: null,
+    action: 'Interact with their post or send follow-up email',
+    channel: 'email',
     type: null,
-    waitDays: 3,
-    dueDate: connSentDate ? new Date(new Date(connSentDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
-    step: 1,
-    totalSteps: 4,
-    urgency: 'waiting',
+    waitDays: WAIT_DAYS,
+    dueDate,
+    step: tpCount + 1,
+    totalSteps: MAX_TOUCHPOINTS,
+    urgency,
   }
 }
 
@@ -3148,7 +3248,7 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
 
               {/* Quick action buttons */}
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                {cadence.channel && cadence.type && cadence.urgency !== 'waiting' && (
+                {cadence.channel && cadence.type && cadence.urgency !== 'waiting' && cadence.urgency !== 'dead' && (
                   <button onClick={() => onAddActivity({ channel: cadence.channel, type: cadence.type, note: cadence.action, date: new Date().toISOString() })}
                     style={{ ...btnPrimary, fontSize: 12, padding: '6px 14px' }}>
                     ✓ Mark as Done
@@ -3158,6 +3258,12 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                   <button onClick={() => onAddActivity({ channel: cadence.channel, type: cadence.type, note: cadence.action, date: new Date().toISOString() })}
                     style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px' }}>
                     ✓ Done Early
+                  </button>
+                )}
+                {cadence.channel && !cadence.type && cadence.urgency !== 'waiting' && cadence.urgency !== 'dead' && (
+                  <button onClick={() => setShowAddActivity(true)}
+                    style={{ ...btnPrimary, fontSize: 12, padding: '6px 14px' }}>
+                    📝 Log Touchpoint
                   </button>
                 )}
                 {cadence.urgency === 'dead' && cadence.deadType === 'unreachable' && (
@@ -3178,7 +3284,7 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                     or {cadence.deadType === 'unreachable' ? 'Not Interested' : 'Unreachable'}
                   </button>
                 )}
-                {cadence.urgency === 'overdue' && (
+                {cadence.urgency === 'overdue' && cadence.urgency !== 'dead' && (
                   <button onClick={() => onAddActivity({ channel: cadence.channel || 'other', type: cadence.type || 'note', note: 'Skipped — moving on', date: new Date().toISOString() })}
                     style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px' }}>
                     Skip this step
