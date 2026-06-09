@@ -111,6 +111,7 @@ const LEAD_STAGES = [
   { key: 'qualified',       label: 'Qualified',       color: '#22c55e', bg: '#f0fdf4' },
   { key: 'converted',       label: 'Converted',       color: '#16a34a', bg: '#dcfce7' },
   { key: 'not_interested',  label: 'Not Interested',  color: '#94a3b8', bg: '#f1f5f9' },
+  { key: 'unreachable',     label: 'Unreachable',     color: '#78716c', bg: '#f5f5f4' },
 ]
 
 const LEAD_SOURCES = [
@@ -126,6 +127,285 @@ function leadStageInfo(key) {
 
 function leadSourceInfo(key) {
   return LEAD_SOURCES.find(s => s.key === key) || LEAD_SOURCES[0]
+}
+
+// Activity channels and types for leads
+const ACTIVITY_CHANNELS = [
+  { key: 'linkedin', label: 'LinkedIn', icon: '🔗', color: '#0077b5' },
+  { key: 'email',    label: 'Email',    icon: '📧', color: '#6366f1' },
+  { key: 'whatsapp', label: 'WhatsApp', icon: '💬', color: '#25d366' },
+  { key: 'phone',    label: 'Phone',    icon: '📞', color: '#f59e0b' },
+  { key: 'meeting',  label: 'Meeting',  icon: '📅', color: '#22c55e' },
+  { key: 'other',    label: 'Other',    icon: '📋', color: '#94a3b8' },
+]
+
+const ACTIVITY_TYPES = {
+  linkedin: [
+    { key: 'connection_sent',     label: 'Connection request sent',   direction: 'outbound' },
+    { key: 'connection_accepted', label: 'Connection accepted',       direction: 'inbound' },
+    { key: 'dm_sent',             label: 'DM sent',                   direction: 'outbound' },
+    { key: 'dm_received',         label: 'DM received',               direction: 'inbound' },
+    { key: 'inmail_sent',         label: 'InMail sent',               direction: 'outbound' },
+    { key: 'inmail_received',     label: 'InMail received',           direction: 'inbound' },
+  ],
+  email: [
+    { key: 'email_sent',     label: 'Email sent',     direction: 'outbound' },
+    { key: 'email_received', label: 'Email received',  direction: 'inbound' },
+  ],
+  whatsapp: [
+    { key: 'whatsapp_sent',     label: 'Message sent',     direction: 'outbound' },
+    { key: 'whatsapp_received', label: 'Message received',  direction: 'inbound' },
+  ],
+  phone: [
+    { key: 'call_made',     label: 'Call made',       direction: 'outbound' },
+    { key: 'call_received', label: 'Call received',    direction: 'inbound' },
+  ],
+  meeting: [
+    { key: 'meeting_scheduled', label: 'Meeting scheduled', direction: 'outbound' },
+    { key: 'meeting_held',      label: 'Meeting held',      direction: 'neutral' },
+    { key: 'meeting_cancelled', label: 'Meeting cancelled', direction: 'neutral' },
+  ],
+  other: [
+    { key: 'note',   label: 'Note / Comment', direction: 'neutral' },
+    { key: 'custom', label: 'Custom event',   direction: 'neutral' },
+  ],
+}
+
+function activityChannelInfo(key) {
+  return ACTIVITY_CHANNELS.find(c => c.key === key) || ACTIVITY_CHANNELS[5]
+}
+
+function activityTypeLabel(channel, type) {
+  const types = ACTIVITY_TYPES[channel] || []
+  const found = types.find(t => t.key === type)
+  return found ? found.label : type
+}
+
+function activityDirection(channel, type) {
+  const types = ACTIVITY_TYPES[channel] || []
+  const found = types.find(t => t.key === type)
+  return found ? found.direction : 'neutral'
+}
+
+function daysAgoLabel(dateStr) {
+  const d = daysAgo(dateStr)
+  if (d === null) return '—'
+  if (d === 0) return 'Today'
+  if (d === 1) return '1 day ago'
+  return `${d}d ago`
+}
+
+// ---- Cadence Engine ----
+// Calculates the suggested next action based on lead activities and state
+
+function calculateCadence(lead) {
+  const activities = lead.activities || []
+  const hasEmail = !!(lead.email && lead.email.trim())
+
+  // Helper: check if a specific activity type exists
+  const has = (ch, type) => activities.some(a => a.channel === ch && a.type === type)
+  const hasAny = (ch, types) => types.some(t => has(ch, t))
+
+  // Helper: get the date of the last activity of a specific type
+  const lastDate = (ch, type) => {
+    const found = activities.filter(a => a.channel === ch && a.type === type).sort((a, b) => new Date(b.date) - new Date(a.date))
+    return found.length > 0 ? found[0].date : null
+  }
+
+  // Count activities of a type
+  const count = (ch, type) => activities.filter(a => a.channel === ch && a.type === type).length
+
+  // Has any real inbound response? (connection_accepted is passive, doesn't count)
+  const PASSIVE_TYPES = ['connection_accepted']
+  const hasResponse = activities.some(a => {
+    const dir = a.direction || activityDirection(a.channel, a.type)
+    return dir === 'inbound' && !PASSIVE_TYPES.includes(a.type)
+  })
+
+  // If lead already has a real response, no cadence suggestion needed (they're in conversation)
+  if (hasResponse || ['nurturing', 'qualified', 'converted', 'not_interested', 'unreachable'].includes(lead.stage)) {
+    return null
+  }
+
+  // Calculate days since a date
+  const daysSince = (dateStr) => dateStr ? Math.floor((Date.now() - new Date(dateStr)) / 86400000) : null
+
+  // ---- CADENCE LOGIC ----
+
+  // Step 1: No activities yet → Send LinkedIn connection
+  if (!has('linkedin', 'connection_sent')) {
+    return {
+      action: 'Send LinkedIn connection request',
+      channel: 'linkedin',
+      type: 'connection_sent',
+      waitDays: 0,
+      dueDate: null,
+      step: 1,
+      totalSteps: 4,
+      urgency: 'normal',
+    }
+  }
+
+  // Step 2: LinkedIn sent, check if accepted
+  const connSentDate = lastDate('linkedin', 'connection_sent')
+  const daysSinceConn = daysSince(connSentDate)
+
+  if (has('linkedin', 'connection_accepted')) {
+    // LinkedIn path — they accepted
+    const dmCount = count('linkedin', 'dm_sent')
+
+    if (dmCount === 0) {
+      // First DM
+      return {
+        action: 'Send LinkedIn DM (intro message)',
+        channel: 'linkedin',
+        type: 'dm_sent',
+        waitDays: 0,
+        dueDate: null,
+        step: 2,
+        totalSteps: 4,
+        urgency: 'normal',
+      }
+    }
+
+    const lastDmDate = lastDate('linkedin', 'dm_sent')
+    const daysSinceLastDm = daysSince(lastDmDate)
+
+    if (dmCount === 1) {
+      const dueInDays = 3 - daysSinceLastDm
+      return {
+        action: 'Send follow-up DM #2',
+        channel: 'linkedin',
+        type: 'dm_sent',
+        waitDays: 3,
+        dueDate: lastDmDate ? new Date(new Date(lastDmDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+        step: 3,
+        totalSteps: 4,
+        urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+      }
+    }
+
+    if (dmCount === 2) {
+      const dueInDays = 4 - daysSinceLastDm
+      return {
+        action: hasEmail ? 'Send final DM or try email' : 'Send final DM (last attempt)',
+        channel: 'linkedin',
+        type: 'dm_sent',
+        waitDays: 4,
+        dueDate: lastDmDate ? new Date(new Date(lastDmDate).getTime() + 4 * 86400000).toISOString().slice(0, 10) : null,
+        step: 4,
+        totalSteps: 4,
+        urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+      }
+    }
+
+    if (dmCount >= 3) {
+      return {
+        action: 'No response after 3 DMs',
+        channel: null,
+        type: null,
+        waitDays: 0,
+        dueDate: null,
+        step: 4,
+        totalSteps: 4,
+        urgency: 'dead',
+        deadType: 'not_interested',
+      }
+    }
+  }
+
+  // LinkedIn NOT accepted path
+  if (daysSinceConn !== null && daysSinceConn >= 3) {
+    // 3+ days since connection, not accepted
+    if (hasEmail) {
+      // Email fallback path
+      const emailCount = count('email', 'email_sent')
+
+      if (emailCount === 0) {
+        return {
+          action: 'LinkedIn not accepted — send intro email',
+          channel: 'email',
+          type: 'email_sent',
+          waitDays: 0,
+          dueDate: null,
+          step: 2,
+          totalSteps: 4,
+          urgency: 'normal',
+        }
+      }
+
+      const lastEmailDate = lastDate('email', 'email_sent')
+      const daysSinceLastEmail = daysSince(lastEmailDate)
+
+      if (emailCount === 1) {
+        const dueInDays = 3 - daysSinceLastEmail
+        return {
+          action: 'Send follow-up email #2',
+          channel: 'email',
+          type: 'email_sent',
+          waitDays: 3,
+          dueDate: lastEmailDate ? new Date(new Date(lastEmailDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+          step: 3,
+          totalSteps: 4,
+          urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+        }
+      }
+
+      if (emailCount === 2) {
+        const dueInDays = 4 - daysSinceLastEmail
+        return {
+          action: 'Send final email #3 (last attempt)',
+          channel: 'email',
+          type: 'email_sent',
+          waitDays: 4,
+          dueDate: lastEmailDate ? new Date(new Date(lastEmailDate).getTime() + 4 * 86400000).toISOString().slice(0, 10) : null,
+          step: 4,
+          totalSteps: 4,
+          urgency: dueInDays <= 0 ? 'overdue' : dueInDays <= 1 ? 'due_soon' : 'waiting',
+        }
+      }
+
+      if (emailCount >= 3) {
+        return {
+          action: 'No response after 3 emails — unreachable',
+          channel: null,
+          type: null,
+          waitDays: 0,
+          dueDate: null,
+          step: 4,
+          totalSteps: 4,
+          urgency: 'dead',
+          deadType: 'unreachable',
+        }
+      }
+    } else {
+      // No email, LinkedIn not accepted
+      return {
+        action: 'Unreachable — no email, LinkedIn not accepted',
+        channel: null,
+        type: null,
+        waitDays: 0,
+        dueDate: null,
+        step: 2,
+        totalSteps: 4,
+        urgency: 'dead',
+        deadType: 'unreachable',
+      }
+    }
+  }
+
+  // LinkedIn sent less than 3 days ago — waiting for acceptance
+  const dueInDays = 3 - daysSinceConn
+  return {
+    action: 'Waiting for LinkedIn connection to be accepted',
+    channel: null,
+    type: null,
+    waitDays: 3,
+    dueDate: connSentDate ? new Date(new Date(connSentDate).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
+    step: 1,
+    totalSteps: 4,
+    urgency: 'waiting',
+  }
 }
 
 const DEFAULT_DATA = {
@@ -352,6 +632,14 @@ export default function App() {
           seededTracks.push(...createTrackRows(id)); seededScores[id] = defaultScores()
         })
         merged = { ...merged, deals: seededDeals, tracks: [...(merged.tracks || []), ...seededTracks], scores: { ...merged.scores, ...seededScores } }
+      }
+      // Migrate existing leads to include activities array and last_response_date
+      if (merged.leads && merged.leads.length > 0) {
+        merged.leads = merged.leads.map(l => ({
+          ...l,
+          activities: l.activities || [{ id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: l.created_at || new Date().toISOString(), note: 'Added to lead list' }],
+          last_response_date: l.last_response_date || '',
+        }))
       }
       return migrateAccounts(merged)
     }
@@ -642,12 +930,14 @@ export default function App() {
       stage: form.stage || 'new',
       last_contact_date: form.last_contact_date || '',
       last_contact_note: form.last_contact_note || '',
+      last_response_date: '',
       next_action: form.next_action || '',
       next_action_date: form.next_action_date || '',
       tags: form.tags || '',
       notes: form.notes || '',
       account_id: form.account_id || '',
       deal_id: null,
+      activities: [{ id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: now, note: 'Added to lead list' }],
       created_at: now,
       updated_at: now,
     }
@@ -674,6 +964,53 @@ export default function App() {
       ...d,
       leads: (d.leads || []).map(l => l.id !== id ? l : {
         ...l, stage, updated_at: new Date().toISOString(),
+      }),
+    }))
+  }
+
+  function addLeadActivity(leadId, activity) {
+    const now = new Date().toISOString()
+    const dir = activityDirection(activity.channel, activity.type)
+    const newActivity = {
+      id: genId(),
+      channel: activity.channel,
+      type: activity.type,
+      direction: dir,
+      date: activity.date || now,
+      note: activity.note || '',
+    }
+    setData(d => ({
+      ...d,
+      leads: (d.leads || []).map(l => {
+        if (l.id !== leadId) return l
+        const activities = [...(l.activities || []), newActivity]
+        const updates = { activities, updated_at: now }
+        // Auto-update last_contact_date for outbound actions
+        if (dir === 'outbound') {
+          const actDate = (activity.date || now).slice(0, 10)
+          if (!l.last_contact_date || actDate >= l.last_contact_date) {
+            updates.last_contact_date = actDate
+            updates.last_contact_note = activityTypeLabel(activity.channel, activity.type) + (activity.note ? ` — ${activity.note}` : '')
+          }
+        }
+        // Auto-update last_response_date for inbound actions
+        // Note: connection_accepted is passive — not a real "response" for cadence purposes
+        const isPassiveInbound = activity.type === 'connection_accepted'
+        if (dir === 'inbound' && !isPassiveInbound) {
+          const actDate = (activity.date || now).slice(0, 10)
+          if (!l.last_response_date || actDate >= l.last_response_date) {
+            updates.last_response_date = actDate
+          }
+          // Auto-progress: if lead is 'new' or 'engaging' and gets a real response → nurturing
+          if (['new', 'researching', 'engaging'].includes(l.stage)) {
+            updates.stage = 'nurturing'
+          }
+        }
+        // Auto-progress: first outbound contact → engaging
+        if (dir === 'outbound' && l.stage === 'new') {
+          updates.stage = 'engaging'
+        }
+        return { ...l, ...updates }
       }),
     }))
   }
@@ -785,12 +1122,20 @@ export default function App() {
 
   // Lead computed
   const allLeads = data.leads || []
-  const activeLeads = allLeads.filter(l => !['converted', 'not_interested'].includes(l.stage))
+  const activeLeads = allLeads.filter(l => !['converted', 'not_interested', 'unreachable'].includes(l.stage))
   const filteredLeads = (() => {
     let arr = allLeads
     if (leadStageFilter === 'active') arr = activeLeads
     else if (leadStageFilter !== 'all') arr = allLeads.filter(l => l.stage === leadStageFilter)
+    const URGENCY_SORT = { overdue: 0, due_soon: 1, normal: 2, waiting: 3, dead: 4 }
     return [...arr].sort((a, b) => {
+      if (leadSort.field === 'cadence_urgency') {
+        const ca = calculateCadence(a), cb = calculateCadence(b)
+        const av = ca ? (URGENCY_SORT[ca.urgency] ?? 5) : 5
+        const bv = cb ? (URGENCY_SORT[cb.urgency] ?? 5) : 5
+        if (av !== bv) return leadSort.dir === 'asc' ? av - bv : bv - av
+        return 0
+      }
       let av = a[leadSort.field], bv = b[leadSort.field]
       av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase()
       if (av < bv) return leadSort.dir === 'asc' ? -1 : 1
@@ -1023,6 +1368,7 @@ export default function App() {
           onDelete={() => { setDeletingLeadId(selectedLead.id); setSelectedLeadId(null) }}
           onUpdateStage={(stage) => updateLeadStage(selectedLead.id, stage)}
           onConvert={() => { setConvertingLead(selectedLead); setSelectedLeadId(null) }}
+          onAddActivity={(activity) => addLeadActivity(selectedLead.id, activity)}
         />
       )}
       {deletingLead && (
@@ -2229,6 +2575,7 @@ function AccountDetailPanel({ account, deals, leads, onClose, onEdit, onDelete, 
 // ---- Leads Tab ----
 
 function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilter, sort, handleSort, onNewLead, onSelectLead, onImportCSV }) {
+  const [showNewMenu, setShowNewMenu] = useState(false)
   const stageCounts = {}
   LEAD_STAGES.forEach(s => { stageCounts[s.key] = leads.filter(l => l.stage === s.key).length })
 
@@ -2245,9 +2592,24 @@ function LeadsTab({ leads, activeLeads, filteredLeads, stageFilter, setStageFilt
       {/* Toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12, flexWrap: 'wrap' }}>
         <LeadStageFilter stageFilter={stageFilter} setStageFilter={setStageFilter} leads={leads} activeLeads={activeLeads} />
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={onImportCSV} style={{ ...btnSecondary, fontSize: 13 }}>📄 Import CSV</button>
-          <button onClick={onNewLead} style={btnPrimary}>+ New Lead</button>
+        <div style={{ position: 'relative' }}>
+          <button onClick={() => setShowNewMenu(m => !m)} style={btnPrimary}>+ New Lead</button>
+          {showNewMenu && (
+            <>
+              <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setShowNewMenu(false)} />
+              <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 4, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', zIndex: 100, overflow: 'hidden', minWidth: 180 }}>
+                <button onClick={() => { setShowNewMenu(false); onNewLead() }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                  Add manually
+                </button>
+                <div style={{ height: 1, background: '#f1f5f9' }} />
+                <button onClick={() => { setShowNewMenu(false); onImportCSV() }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                  Import CSV
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -2300,8 +2662,11 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
     { key: 'country', label: 'Country' },
     { key: 'source', label: 'Source' },
     { key: 'stage', label: 'Stage' },
-    { key: 'next_action_date', label: 'Next Action' },
+    { key: 'cadence_urgency', label: 'Action' },
   ]
+
+  // Urgency sort order: overdue first, then due_soon, normal, waiting, dead, null last
+  const URGENCY_ORDER = { overdue: 0, due_soon: 1, normal: 2, waiting: 3, dead: 4 }
 
   const thStyle = {
     padding: '10px 12px', textAlign: 'left', fontSize: 12, fontWeight: 600,
@@ -2329,13 +2694,20 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
           {leads.map((lead, i) => {
             const si = leadStageInfo(lead.stage)
             const src = leadSourceInfo(lead.source)
-            const nextDays = daysAgo(lead.next_action_date)
-            const overdue = lead.next_action_date && nextDays !== null && nextDays > 0
+            const cadence = calculateCadence(lead)
+            const urgencyStyles = {
+              overdue:  { bg: '#fef2f2', color: '#ef4444', label: '⚠ Action Required' },
+              due_soon: { bg: '#fffbeb', color: '#f59e0b', label: 'Due Soon' },
+              normal:   { bg: '#f0fdf4', color: '#22c55e', label: '→ Next Step' },
+              waiting:  { bg: '#f0f9ff', color: '#3b82f6', label: 'Waiting' },
+              dead:     { bg: '#f5f5f4', color: '#78716c', label: 'End' },
+            }
+            const us = cadence ? urgencyStyles[cadence.urgency] : null
             return (
               <tr key={lead.id} onClick={() => onSelectLead(lead.id)}
-                style={{ borderBottom: i < leads.length - 1 ? '1px solid #f1f5f9' : 'none', cursor: 'pointer', transition: 'background 0.1s' }}
+                style={{ borderBottom: i < leads.length - 1 ? '1px solid #f1f5f9' : 'none', cursor: 'pointer', transition: 'background 0.1s', background: cadence?.urgency === 'overdue' ? '#fffbfb' : 'transparent' }}
                 onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                onMouseLeave={e => e.currentTarget.style.background = cadence?.urgency === 'overdue' ? '#fffbfb' : 'transparent'}>
                 <td style={tdStyle}>
                   <div style={{ fontWeight: 600 }}>{lead.full_name || '—'}</div>
                   {lead.email && <div style={{ fontSize: 11, color: '#94a3b8' }}>{lead.email}</div>}
@@ -2350,12 +2722,14 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
                   <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 500 }}>{si.label}</span>
                 </td>
                 <td style={tdStyle}>
-                  {lead.next_action_date ? (
-                    <span style={{ color: overdue ? '#ef4444' : '#374151', fontWeight: overdue ? 600 : 400 }}>
-                      {fmtDate(lead.next_action_date)}
-                      {lead.next_action && <div style={{ fontSize: 11, color: '#94a3b8', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lead.next_action}</div>}
-                    </span>
-                  ) : '—'}
+                  {us ? (
+                    <div>
+                      <span style={{ background: us.bg, color: us.color, borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>{us.label}</span>
+                      {cadence.action && <div style={{ fontSize: 11, color: '#64748b', marginTop: 3, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cadence.action}</div>}
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: '#94a3b8' }}>—</span>
+                  )}
                 </td>
               </tr>
             )
@@ -2369,6 +2743,7 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
 // ---- Lead Form Modal (with enrichment) ----
 
 function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }) {
+  const isEditing = !!lead?.id
   const [form, setForm] = useState({
     account_id: lead?.account_id || '',
     full_name: lead?.full_name || '',
@@ -2390,8 +2765,37 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
   })
   const [enriching, setEnriching] = useState(false)
   const [enrichError, setEnrichError] = useState('')
+  const [accountSearch, setAccountSearch] = useState(() => {
+    if (lead?.account_id) {
+      const match = accounts.find(a => a.id === lead.account_id)
+      return match ? match.name : ''
+    }
+    return ''
+  })
+  const [showAccountDropdown, setShowAccountDropdown] = useState(false)
+  const [showSecondary, setShowSecondary] = useState(isEditing)
+  const [showActivity, setShowActivity] = useState(false)
+  const accountInputRef = useRef(null)
+
+  const filteredAccounts = accountSearch.trim()
+    ? accounts.filter(a => a.name.toLowerCase().includes(accountSearch.toLowerCase()))
+    : accounts
 
   function set(key, val) { setForm(f => ({ ...f, [key]: val })) }
+
+  function selectAccount(acct) {
+    set('account_id', acct.id)
+    set('company', acct.name)
+    if (acct.country && !form.country) set('country', acct.country)
+    if (acct.industry && !form.industry) set('industry', acct.industry)
+    setAccountSearch(acct.name)
+    setShowAccountDropdown(false)
+  }
+
+  function clearAccount() {
+    set('account_id', '')
+    setAccountSearch('')
+  }
 
   async function handleEnrich() {
     if (!form.linkedin_url) return
@@ -2442,29 +2846,64 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
     </div>
   )
 
+  const toggleBtn = (label, isOpen, toggle) => (
+    <button type="button" onClick={toggle}
+      style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: '1px solid #e2e8f0', borderRadius: 6, padding: '6px 12px', fontSize: 12, fontWeight: 500, color: '#64748b', cursor: 'pointer', marginTop: 8 }}>
+      <span style={{ transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', display: 'inline-block' }}>▶</span>
+      {label}
+    </button>
+  )
+
   return (
     <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
       <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontWeight: 700, fontSize: 16 }}>{lead?.id ? 'Edit Lead' : 'New Lead'}</div>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{isEditing ? 'Edit Lead' : 'New Lead'}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}>{'✕'}</button>
         </div>
         <form onSubmit={handleSubmit} style={{ padding: 24 }}>
-          {/* Account selector */}
-          <div style={{ marginBottom: 16 }}>
+          {/* Account — searchable input */}
+          <div style={{ marginBottom: 16, position: 'relative' }}>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#64748b', marginBottom: 4 }}>Account (Company)</label>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <select value={form.account_id} onChange={e => {
-                const acct = accounts.find(a => a.id === e.target.value)
-                set('account_id', e.target.value)
-                if (acct) { set('company', acct.name); if (acct.country && !form.country) set('country', acct.country); if (acct.industry && !form.industry) set('industry', acct.industry) }
-              }}
-                style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                <option value="">— Select account —</option>
-                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-              {onCreateAccount && <button type="button" onClick={() => onCreateAccount((newAcct) => { set('account_id', newAcct.id); set('company', newAcct.name); if (newAcct.country && !form.country) set('country', newAcct.country); if (newAcct.industry && !form.industry) set('industry', newAcct.industry) })}
-                style={{ ...btnSecondary, whiteSpace: 'nowrap', fontSize: 12, padding: '8px 12px' }}>+ New</button>}
+              <div style={{ flex: 1, position: 'relative' }}>
+                <input ref={accountInputRef} type="text" value={accountSearch}
+                  placeholder="Type to search accounts..."
+                  onChange={e => { setAccountSearch(e.target.value); set('account_id', ''); setShowAccountDropdown(true) }}
+                  onFocus={() => setShowAccountDropdown(true)}
+                  style={{ width: '100%', padding: '8px 10px', paddingRight: form.account_id ? 28 : 10, border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: form.account_id ? '#f0fdf4' : '#fff' }} />
+                {form.account_id && (
+                  <button type="button" onClick={clearAccount}
+                    style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 14, padding: 2 }}>✕</button>
+                )}
+                {showAccountDropdown && (
+                  <>
+                    <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setShowAccountDropdown(false)} />
+                    <div style={{ position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 2, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', zIndex: 100, maxHeight: 200, overflow: 'auto' }}>
+                      {filteredAccounts.length > 0 ? filteredAccounts.map(a => (
+                        <button key={a.id} type="button" onClick={() => selectAccount(a)}
+                          style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: a.id === form.account_id ? '#f0fdf4' : 'none', textAlign: 'left', cursor: 'pointer', fontSize: 13 }}
+                          onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = a.id === form.account_id ? '#f0fdf4' : 'none'}>
+                          <div style={{ fontWeight: 500 }}>{a.name}</div>
+                          {(a.country || a.industry) && <div style={{ fontSize: 11, color: '#94a3b8' }}>{[a.industry, a.country].filter(Boolean).join(' · ')}</div>}
+                        </button>
+                      )) : (
+                        <div style={{ padding: '10px 12px', fontSize: 12, color: '#94a3b8' }}>No matching accounts</div>
+                      )}
+                      {onCreateAccount && (
+                        <>
+                          <div style={{ height: 1, background: '#f1f5f9' }} />
+                          <button type="button" onClick={() => { setShowAccountDropdown(false); onCreateAccount((newAcct) => { selectAccount(newAcct) }) }}
+                            style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 13, color: '#6366f1', fontWeight: 500 }}
+                            onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                            + Create new account{accountSearch.trim() ? `: "${accountSearch.trim()}"` : ''}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2485,45 +2924,65 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
             {enrichError && <div style={{ marginTop: 6, fontSize: 12, color: '#ef4444' }}>{enrichError}</div>}
           </div>
 
+          {/* Primary fields — always visible */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             {field('Full Name *', inp('full_name'))}
             {field('Email', inp('email', 'email'))}
             {field('Title / Role', inp('title'))}
-            {field('Phone', inp('phone', 'tel'))}
             {field('Company', inp('company'))}
-            {field('Industry', inp('industry'))}
-            {field('Country', (
-              <select value={form.country} onChange={e => set('country', e.target.value)}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                <option value="">{'—'} Select {'—'}</option>
-                {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            ))}
-            {field('Source', (
-              <select value={form.source} onChange={e => set('source', e.target.value)}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                {LEAD_SOURCES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-              </select>
-            ))}
-            {field('Stage', (
-              <select value={form.stage} onChange={e => set('stage', e.target.value)}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                {LEAD_STAGES.filter(s => s.key !== 'converted').map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-              </select>
-            ))}
-            {field('Next Action', inp('next_action', 'text', 'e.g. Send intro email'))}
-            {field('Next Action Date', inp('next_action_date', 'date'))}
-            {field('Last Contact Date', inp('last_contact_date', 'date'))}
-            {field('Last Contact Note', inp('last_contact_note'), true)}
-            {field('Tags', inp('tags', 'text', 'e.g. fintech, high-priority'), true)}
-            {field('Notes', (
-              <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3}
-                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
-            ), true)}
           </div>
+
+          {/* Secondary fields — toggle */}
+          {toggleBtn(showSecondary ? 'Hide additional fields' : 'Show additional fields (country, industry, source...)', showSecondary, () => setShowSecondary(s => !s))}
+          {showSecondary && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12, padding: 16, background: '#fafbfc', borderRadius: 8, border: '1px solid #f1f5f9' }}>
+              {field('Phone', inp('phone', 'tel'))}
+              {field('Industry', inp('industry'))}
+              {field('Country', (
+                <select value={form.country} onChange={e => set('country', e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                  <option value="">{'—'} Select {'—'}</option>
+                  {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ))}
+              {field('Source', (
+                <select value={form.source} onChange={e => set('source', e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                  {LEAD_SOURCES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                </select>
+              ))}
+              {field('Stage', (
+                <select value={form.stage} onChange={e => set('stage', e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, background: '#fff' }}>
+                  {LEAD_STAGES.filter(s => s.key !== 'converted').map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                </select>
+              ))}
+            </div>
+          )}
+
+          {/* Activity fields — only when editing, toggle */}
+          {isEditing && (
+            <>
+              {toggleBtn(showActivity ? 'Hide activity fields' : 'Show activity fields (next action, notes, tags...)', showActivity, () => setShowActivity(a => !a))}
+              {showActivity && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12, padding: 16, background: '#fafbfc', borderRadius: 8, border: '1px solid #f1f5f9' }}>
+                  {field('Next Action', inp('next_action', 'text', 'e.g. Send intro email'))}
+                  {field('Next Action Date', inp('next_action_date', 'date'))}
+                  {field('Last Contact Date', inp('last_contact_date', 'date'))}
+                  {field('Last Contact Note', inp('last_contact_note'), true)}
+                  {field('Tags', inp('tags', 'text', 'e.g. fintech, high-priority'), true)}
+                  {field('Notes', (
+                    <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3}
+                      style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
+                  ), true)}
+                </div>
+              )}
+            </>
+          )}
+
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
             <button type="button" onClick={onClose} style={btnSecondary}>Cancel</button>
-            <button type="submit" style={btnPrimary}>{lead?.id ? 'Save Changes' : 'Add Lead'}</button>
+            <button type="submit" style={btnPrimary}>{isEditing ? 'Save Changes' : 'Add Lead'}</button>
           </div>
         </form>
       </div>
@@ -2533,17 +2992,44 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
 
 // ---- Lead Detail Panel ----
 
-function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onConvert }) {
+function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onConvert, onAddActivity }) {
   const si = leadStageInfo(lead.stage)
   const src = leadSourceInfo(lead.source)
   const daysIn = daysAgo(lead.created_at)
   const lastContactDays = daysAgo(lead.last_contact_date)
+  const lastResponseDays = daysAgo(lead.last_response_date)
   const nextDays = daysAgo(lead.next_action_date)
   const overdue = lead.next_action_date && nextDays !== null && nextDays > 0
+  const activities = [...(lead.activities || [])].sort((a, b) => new Date(b.date) - new Date(a.date))
+  const cadence = calculateCadence(lead)
+
+  const [showAddActivity, setShowAddActivity] = useState(false)
+  const [actChannel, setActChannel] = useState('linkedin')
+  const [actType, setActType] = useState('connection_sent')
+  const [actNote, setActNote] = useState('')
+  const [actDate, setActDate] = useState(new Date().toISOString().slice(0, 10))
+
+  function handleAddActivity(e) {
+    e.preventDefault()
+    onAddActivity({ channel: actChannel, type: actType, note: actNote, date: new Date(actDate + 'T12:00:00').toISOString() })
+    setActNote('')
+    setShowAddActivity(false)
+    // Reset to defaults
+    setActChannel('linkedin')
+    setActType('connection_sent')
+    setActDate(new Date().toISOString().slice(0, 10))
+  }
+
+  // When channel changes, auto-select first type of that channel
+  function handleChannelChange(ch) {
+    setActChannel(ch)
+    const types = ACTIVITY_TYPES[ch] || []
+    if (types.length > 0) setActType(types[0].key)
+  }
 
   return (
     <div style={overlayStyle} onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto' }}>
+      <div style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 600, maxHeight: '90vh', overflow: 'auto' }}>
         {/* Header */}
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #e2e8f0' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
@@ -2592,70 +3078,259 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
             ))}
           </div>
 
-          {/* Contact info */}
+          {/* Summary cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 20 }}>
+            <div style={{ ...cardStyle, padding: 10 }}>
+              <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 2 }}>IN PIPELINE</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>{daysIn === 0 ? 'Today' : daysIn != null ? `${daysIn}d` : '—'}</div>
+            </div>
+            <div style={{ ...cardStyle, padding: 10 }}>
+              <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 2 }}>LAST OUTREACH</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: lastContactDays > 14 ? '#ef4444' : '#374151' }}>
+                {lead.last_contact_date ? daysAgoLabel(lead.last_contact_date) : '—'}
+              </div>
+            </div>
+            <div style={{ ...cardStyle, padding: 10 }}>
+              <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 2 }}>LAST RESPONSE</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: lastResponseDays > 14 ? '#f59e0b' : '#374151' }}>
+                {lead.last_response_date ? daysAgoLabel(lead.last_response_date) : '—'}
+              </div>
+            </div>
+          </div>
+
+          {/* Cadence-driven Next Action */}
+          {cadence && (
+            <div style={{
+              ...cardStyle, padding: 14, marginBottom: 20,
+              background: cadence.urgency === 'overdue' ? '#fef2f2' : cadence.urgency === 'due_soon' ? '#fffbeb' : cadence.urgency === 'dead' ? '#f8fafc' : cadence.urgency === 'waiting' ? '#f0f9ff' : '#f0fdf4',
+              border: `1px solid ${cadence.urgency === 'overdue' ? '#fecaca' : cadence.urgency === 'due_soon' ? '#fde68a' : cadence.urgency === 'dead' ? '#e2e8f0' : cadence.urgency === 'waiting' ? '#bae6fd' : '#bbf7d0'}`,
+            }}>
+              {/* Header with urgency badge */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {cadence.urgency === 'overdue' && <span style={{ background: '#ef4444', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>⚠ ACTION REQUIRED</span>}
+                  {cadence.urgency === 'due_soon' && <span style={{ background: '#f59e0b', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>DUE SOON</span>}
+                  {cadence.urgency === 'waiting' && <span style={{ background: '#3b82f6', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>WAITING</span>}
+                  {cadence.urgency === 'normal' && <span style={{ background: '#22c55e', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>→ NEXT STEP</span>}
+                  {cadence.urgency === 'dead' && <span style={{ background: '#94a3b8', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>END OF CADENCE</span>}
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500 }}>
+                  Step {cadence.step}/{cadence.totalSteps}
+                </div>
+              </div>
+
+              {/* Action description */}
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                {cadence.channel && activityChannelInfo(cadence.channel).icon} {cadence.action}
+              </div>
+
+              {/* Due date */}
+              {cadence.dueDate && cadence.urgency === 'waiting' && (
+                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
+                  Due: {fmtDate(cadence.dueDate)}
+                </div>
+              )}
+              {cadence.dueDate && cadence.urgency === 'overdue' && (
+                <div style={{ fontSize: 12, color: '#ef4444', fontWeight: 500, marginBottom: 8 }}>
+                  Was due {fmtDate(cadence.dueDate)} — {daysAgoLabel(cadence.dueDate)}
+                </div>
+              )}
+
+              {/* Quick action buttons */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                {cadence.channel && cadence.type && cadence.urgency !== 'waiting' && (
+                  <button onClick={() => onAddActivity({ channel: cadence.channel, type: cadence.type, note: cadence.action, date: new Date().toISOString() })}
+                    style={{ ...btnPrimary, fontSize: 12, padding: '6px 14px' }}>
+                    ✓ Mark as Done
+                  </button>
+                )}
+                {cadence.channel && cadence.type && cadence.urgency === 'waiting' && (
+                  <button onClick={() => onAddActivity({ channel: cadence.channel, type: cadence.type, note: cadence.action, date: new Date().toISOString() })}
+                    style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px' }}>
+                    ✓ Done Early
+                  </button>
+                )}
+                {cadence.urgency === 'dead' && cadence.deadType === 'unreachable' && (
+                  <button onClick={() => onUpdateStage('unreachable')}
+                    style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px', color: '#78716c' }}>
+                    Mark Unreachable
+                  </button>
+                )}
+                {cadence.urgency === 'dead' && cadence.deadType !== 'unreachable' && (
+                  <button onClick={() => onUpdateStage('not_interested')}
+                    style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px', color: '#94a3b8' }}>
+                    Mark Not Interested
+                  </button>
+                )}
+                {cadence.urgency === 'dead' && (
+                  <button onClick={() => onUpdateStage(cadence.deadType === 'unreachable' ? 'not_interested' : 'unreachable')}
+                    style={{ ...btnSecondary, fontSize: 11, padding: '6px 14px', color: '#94a3b8' }}>
+                    or {cadence.deadType === 'unreachable' ? 'Not Interested' : 'Unreachable'}
+                  </button>
+                )}
+                {cadence.urgency === 'overdue' && (
+                  <button onClick={() => onAddActivity({ channel: cadence.channel || 'other', type: cadence.type || 'note', note: 'Skipped — moving on', date: new Date().toISOString() })}
+                    style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px' }}>
+                    Skip this step
+                  </button>
+                )}
+              </div>
+
+              {/* Progress bar */}
+              <div style={{ marginTop: 10, background: '#e2e8f0', borderRadius: 4, height: 4, overflow: 'hidden' }}>
+                <div style={{ height: '100%', borderRadius: 4, background: cadence.urgency === 'overdue' ? '#ef4444' : cadence.urgency === 'dead' ? '#94a3b8' : '#6366f1', width: `${(cadence.step / cadence.totalSteps) * 100}%`, transition: 'width 0.3s' }} />
+              </div>
+            </div>
+          )}
+
+          {/* Manual next action (if set via edit form, shown alongside cadence) */}
+          {(lead.next_action || lead.next_action_date) && (
+            <div style={{ ...cardStyle, padding: 10, marginBottom: 20, background: overdue ? '#fef2f2' : '#f8fafc', border: `1px solid ${overdue ? '#fecaca' : '#e2e8f0'}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: overdue ? '#ef4444' : '#94a3b8', marginBottom: 2 }}>
+                    {overdue ? '⚠ MANUAL ACTION OVERDUE' : 'MANUAL NEXT ACTION'}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500 }}>{lead.next_action || 'Follow up'}</div>
+                </div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>
+                  {lead.next_action_date ? fmtDate(lead.next_action_date) : ''}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Contact info — compact */}
           <SectionLabel>Contact</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
             <MiniCard label="Email" value={lead.email || '—'} />
             <MiniCard label="Phone" value={lead.phone || '—'} />
             <MiniCard label="Country" value={lead.country || '—'} />
             <MiniCard label="Source" value={<span style={{ color: src.color, fontWeight: 600 }}>{src.label}</span>} />
           </div>
 
-          {/* Company info */}
-          {(lead.company || lead.industry) && (
-            <>
-              <SectionLabel>Company</SectionLabel>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-                <MiniCard label="Company" value={lead.company || '—'} />
-                <MiniCard label="Industry" value={lead.industry || '—'} />
+          {/* Activity Timeline */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <SectionLabel style={{ margin: 0 }}>Activity Timeline</SectionLabel>
+            <button onClick={() => setShowAddActivity(a => !a)}
+              style={{ ...btnPrimary, fontSize: 12, padding: '5px 12px' }}>
+              + Log Activity
+            </button>
+          </div>
+
+          {/* Add Activity Form */}
+          {showAddActivity && (
+            <form onSubmit={handleAddActivity} style={{ ...cardStyle, padding: 16, marginBottom: 16, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                {ACTIVITY_CHANNELS.map(ch => (
+                  <button key={ch.key} type="button" onClick={() => handleChannelChange(ch.key)}
+                    style={{
+                      padding: '5px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                      border: actChannel === ch.key ? `2px solid ${ch.color}` : '1px solid #e2e8f0',
+                      background: actChannel === ch.key ? ch.color + '15' : '#fff',
+                      color: actChannel === ch.key ? ch.color : '#64748b',
+                    }}>
+                    {ch.icon} {ch.label}
+                  </button>
+                ))}
               </div>
-            </>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#64748b', marginBottom: 3 }}>Type</label>
+                  <select value={actType} onChange={e => setActType(e.target.value)}
+                    style={{ width: '100%', padding: '7px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, background: '#fff' }}>
+                    {(ACTIVITY_TYPES[actChannel] || []).map(t => (
+                      <option key={t.key} value={t.key}>
+                        {t.direction === 'outbound' ? '↑ ' : t.direction === 'inbound' ? '↓ ' : ''}{t.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#64748b', marginBottom: 3 }}>Date</label>
+                  <input type="date" value={actDate} onChange={e => setActDate(e.target.value)}
+                    style={{ width: '100%', padding: '7px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <input type="text" value={actNote} onChange={e => setActNote(e.target.value)}
+                  placeholder="Note (optional) — e.g. subject, context..."
+                  style={{ width: '100%', padding: '7px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button type="button" onClick={() => setShowAddActivity(false)} style={{ ...btnSecondary, fontSize: 12, padding: '5px 12px' }}>Cancel</button>
+                <button type="submit" style={{ ...btnPrimary, fontSize: 12, padding: '5px 12px' }}>Log Activity</button>
+              </div>
+            </form>
           )}
 
-          {/* Activity */}
-          <SectionLabel>Activity</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-            <div style={{ ...cardStyle, padding: 12 }}>
-              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>LAST CONTACT</div>
-              {lead.last_contact_date ? (
-                <>
-                  <div style={{ fontSize: 13 }}>{fmtDate(lead.last_contact_date)}</div>
-                  <div style={{ fontSize: 12, color: lastContactDays > 14 ? '#ef4444' : '#94a3b8' }}>{lastContactDays}d ago</div>
-                </>
-              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>{'—'}</div>}
-            </div>
-            <div style={{ ...cardStyle, padding: 12 }}>
-              <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500, marginBottom: 4 }}>NEXT ACTION</div>
-              {lead.next_action_date ? (
-                <>
-                  <div style={{ fontSize: 13, color: overdue ? '#ef4444' : '#374151', fontWeight: overdue ? 600 : 400 }}>
-                    {fmtDate(lead.next_action_date)} {overdue && '(overdue!)'}
+          {/* Timeline */}
+          <div style={{ position: 'relative', paddingLeft: 24 }}>
+            {/* Vertical line */}
+            {activities.length > 0 && (
+              <div style={{ position: 'absolute', left: 7, top: 6, bottom: 6, width: 2, background: '#e2e8f0', borderRadius: 1 }} />
+            )}
+            {activities.length > 0 ? activities.map((act, i) => {
+              const ch = activityChannelInfo(act.channel)
+              const dir = act.direction || activityDirection(act.channel, act.type)
+              const isInbound = dir === 'inbound'
+              const isOutbound = dir === 'outbound'
+              return (
+                <div key={act.id || i} style={{ position: 'relative', paddingBottom: i < activities.length - 1 ? 12 : 0, paddingLeft: 16 }}>
+                  {/* Dot */}
+                  <div style={{
+                    position: 'absolute', left: -24, top: 3, width: 16, height: 16, borderRadius: '50%',
+                    background: ch.color + '20', border: `2px solid ${ch.color}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8,
+                  }}>
+                    {isOutbound ? '↑' : isInbound ? '↓' : '·'}
                   </div>
-                  {lead.next_action && <div style={{ fontSize: 12, color: '#64748b' }}>{lead.next_action}</div>}
-                </>
-              ) : <div style={{ fontSize: 13, color: '#94a3b8' }}>{'—'}</div>}
-            </div>
-          </div>
-          {lead.last_contact_note && (
-            <div style={{ ...cardStyle, padding: 12, marginBottom: 20, fontSize: 13, color: '#374151', background: '#f8fafc' }}>
-              {lead.last_contact_note}
-            </div>
-          )}
-
-          {/* Meta */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-            <MiniCard label="In Pipeline" value={daysIn != null ? `${daysIn}d` : '—'} />
-            <MiniCard label="Tags" value={lead.tags || '—'} />
-          </div>
-
-          {/* Notes */}
-          {lead.notes && (
-            <>
-              <SectionLabel>Notes</SectionLabel>
-              <div style={{ ...cardStyle, padding: 12, fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap', background: '#f8fafc' }}>
-                {lead.notes}
+                  {/* Content */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 500, color: '#374151' }}>
+                        <span style={{ color: ch.color, marginRight: 4 }}>{ch.icon}</span>
+                        {activityTypeLabel(act.channel, act.type)}
+                        {isOutbound && <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 6 }}>SENT</span>}
+                        {isInbound && <span style={{ fontSize: 10, color: '#22c55e', marginLeft: 6, fontWeight: 600 }}>RECEIVED</span>}
+                      </div>
+                      {act.note && <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{act.note}</div>}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                      {fmtDate(act.date)}
+                    </div>
+                  </div>
+                </div>
+              )
+            }) : (
+              <div style={{ fontSize: 13, color: '#94a3b8', padding: '8px 0' }}>
+                No activities yet. Click "Log Activity" to start tracking.
               </div>
-            </>
+            )}
+          </div>
+
+          {/* Tags & Notes */}
+          {(lead.tags || lead.notes) && (
+            <div style={{ marginTop: 20 }}>
+              {lead.tags && (
+                <div style={{ marginBottom: 8 }}>
+                  <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 500 }}>Tags: </span>
+                  {lead.tags.split(',').map((t, i) => (
+                    <span key={i} style={{ display: 'inline-block', background: '#eef2ff', color: '#6366f1', borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 500, marginRight: 4 }}>
+                      {t.trim()}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {lead.notes && (
+                <>
+                  <SectionLabel>Notes</SectionLabel>
+                  <div style={{ ...cardStyle, padding: 12, fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap', background: '#f8fafc' }}>
+                    {lead.notes}
+                  </div>
+                </>
+              )}
+            </div>
           )}
         </div>
       </div>
