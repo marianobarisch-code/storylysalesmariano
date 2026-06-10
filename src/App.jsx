@@ -555,6 +555,61 @@ function daysAgo(dateStr) {
   return Math.floor((Date.now() - new Date(dateStr)) / 86400000)
 }
 
+// Calendar days from today until a date (positive = future, 0 = today, negative = past)
+function daysUntil(dateStr) {
+  if (!dateStr) return null
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const target = new Date(String(dateStr).slice(0, 10) + 'T00:00:00')
+  return Math.round((target - today) / 86400000)
+}
+
+// Most recent activity date on a lead (the "last time you did something")
+function lastActivityDate(lead) {
+  const dates = (lead.activities || []).map(a => a.date).filter(Boolean).sort()
+  return dates.length ? dates[dates.length - 1] : null
+}
+
+// Short countdown phrase for a cadence's next action
+function cadenceCountdown(cadence) {
+  if (!cadence) return null
+  if (cadence.urgency === 'dead') return null
+  if (cadence.urgency === 'normal') return 'do it now'
+  const d = daysUntil(cadence.dueDate)
+  if (d == null) return null
+  if (d > 1) return `in ${d} days`
+  if (d === 1) return 'tomorrow'
+  if (d === 0) return 'due today'
+  if (d === -1) return '1 day overdue'
+  return `${Math.abs(d)} days overdue`
+}
+
+// ---- Brand logo icons ----
+function LinkedInIcon({ size = 15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="#0a66c2" style={{ flexShrink: 0 }}>
+      <path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.13 1.45-2.13 2.94v5.67H9.35V9h3.42v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.22.79 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/>
+    </svg>
+  )
+}
+function GmailIcon({ size = 15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" style={{ flexShrink: 0 }}>
+      <path fill="#4caf50" d="M45 16.2l-5 2.75-5 4.75L35 40h7c1.657 0 3-1.343 3-3V16.2z"/>
+      <path fill="#1e88e5" d="M3 16.2l3.614 1.71L13 23.7V40H6c-1.657 0-3-1.343-3-3V16.2z"/>
+      <path fill="#e53935" d="M35 11.2L24 19.45 13 11.2 12 17l1 6.7 11 8.25 11-8.25L36 17z"/>
+      <path fill="#c62828" d="M3 12.298V16.2l10 7.5V11.2L9.876 8.859C9.132 8.301 8.228 8 7.298 8 4.924 8 3 9.924 3 12.298z"/>
+      <path fill="#fbc02d" d="M45 12.298V16.2l-10 7.5V11.2l3.124-2.341C38.868 8.301 39.772 8 40.702 8 43.076 8 45 9.924 45 12.298z"/>
+    </svg>
+  )
+}
+function WhatsAppIcon({ size = 15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="#25d366" style={{ flexShrink: 0 }}>
+      <path d="M.057 24l1.687-6.163a11.867 11.867 0 0 1-1.587-5.945C.16 5.335 5.495 0 12.05 0a11.817 11.817 0 0 1 8.413 3.488 11.824 11.824 0 0 1 3.48 8.414c-.003 6.557-5.338 11.892-11.893 11.892a11.9 11.9 0 0 1-5.688-1.448L.057 24zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884a9.86 9.86 0 0 0 1.51 5.26l-.999 3.648 3.978-1.039zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.241-.579-.486-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.71.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.247-.694.247-1.289.173-1.413z"/>
+    </svg>
+  )
+}
+
 function calcProbFromStage(stage) {
   return STAGE_PROBABILITY[stage] || 0
 }
@@ -2834,8 +2889,16 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
                 <td style={tdStyle}>
                   {us ? (
                     <div>
-                      <span style={{ background: us.bg, color: us.color, borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>{us.label}</span>
-                      {cadence.action && <div style={{ fontSize: 11, color: '#64748b', marginTop: 3, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cadence.action}</div>}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ background: us.bg, color: us.color, borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>{us.label}</span>
+                        {(() => {
+                          const cd = cadenceCountdown(cadence)
+                          if (!cd || cadence.urgency === 'normal') return null
+                          const c = cadence.urgency === 'overdue' ? '#ef4444' : cadence.urgency === 'due_soon' ? '#d97706' : '#64748b'
+                          return <span style={{ fontSize: 10, color: c, fontWeight: 600, whiteSpace: 'nowrap' }}>⏱ {cd}</span>
+                        })()}
+                      </div>
+                      {cadence.action && <div style={{ fontSize: 11, color: '#64748b', marginTop: 3, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cadence.action}</div>}
                     </div>
                   ) : (
                     <span style={{ fontSize: 12, color: '#94a3b8' }}>—</span>
@@ -3164,9 +3227,23 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
             <button onClick={onDelete} style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', color: '#ef4444' }}>Delete</button>
             {lead.linkedin_url && (
               <a href={lead.linkedin_url} target="_blank" rel="noreferrer"
-                style={{ ...btnSecondary, fontSize: 13, padding: '6px 14px', textDecoration: 'none', color: '#0077b5', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                style={{ ...btnSecondary, fontSize: 13, padding: '6px 12px', textDecoration: 'none', color: '#0a66c2', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                 onClick={e => e.stopPropagation()}>
-                LinkedIn {'↗'}
+                <LinkedInIcon /> LinkedIn
+              </a>
+            )}
+            {lead.email && (
+              <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(lead.email)}`} target="_blank" rel="noreferrer"
+                style={{ ...btnSecondary, fontSize: 13, padding: '6px 12px', textDecoration: 'none', color: '#374151', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                onClick={e => e.stopPropagation()}>
+                <GmailIcon /> Email
+              </a>
+            )}
+            {lead.phone && (
+              <a href={`https://wa.me/${String(lead.phone).replace(/[^0-9]/g, '')}`} target="_blank" rel="noreferrer"
+                style={{ ...btnSecondary, fontSize: 13, padding: '6px 12px', textDecoration: 'none', color: '#1f7a3d', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                onClick={e => e.stopPropagation()}>
+                <WhatsAppIcon /> WhatsApp
               </a>
             )}
           </div>
@@ -3234,17 +3311,31 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                 {cadence.channel && activityChannelInfo(cadence.channel).icon} {cadence.action}
               </div>
 
-              {/* Due date */}
-              {cadence.dueDate && cadence.urgency === 'waiting' && (
-                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
-                  Due: {fmtDate(cadence.dueDate)}
-                </div>
-              )}
-              {cadence.dueDate && cadence.urgency === 'overdue' && (
-                <div style={{ fontSize: 12, color: '#ef4444', fontWeight: 500, marginBottom: 8 }}>
-                  Was due {fmtDate(cadence.dueDate)} — {daysAgoLabel(cadence.dueDate)}
-                </div>
-              )}
+              {/* Countdown + last-touch context */}
+              {(() => {
+                const countdown = cadenceCountdown(cadence)
+                const lastTouch = lastActivityDate(lead)
+                const lastDays = daysAgo(lastTouch)
+                const cdColor = cadence.urgency === 'overdue' ? '#ef4444' : cadence.urgency === 'due_soon' ? '#d97706' : cadence.urgency === 'normal' ? '#16a34a' : '#3b82f6'
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 }}>
+                    {countdown && cadence.urgency !== 'normal' && (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: cdColor, fontWeight: 600 }}>
+                        ⏱ Next action {countdown}
+                        {cadence.dueDate && <span style={{ color: '#94a3b8', fontWeight: 400 }}>({fmtDate(cadence.dueDate)})</span>}
+                      </span>
+                    )}
+                    {countdown && cadence.urgency === 'normal' && (
+                      <span style={{ color: cdColor, fontWeight: 600 }}>⏱ Ready now</span>
+                    )}
+                    {lastTouch && (
+                      <span style={{ color: '#94a3b8' }}>
+                        · Last touch {lastDays === 0 ? 'today' : lastDays === 1 ? 'yesterday' : `${lastDays}d ago`}
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Quick action buttons */}
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
