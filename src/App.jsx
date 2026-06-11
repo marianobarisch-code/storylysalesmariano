@@ -4,10 +4,10 @@ import { loadData, saveData, exportToFile, importFromFile, loadFromCloud, saveTo
 // ---- Constants ----
 
 const TRACKS_CONFIG = [
-  { key: 'tech_review',    label: 'Tech Review',         color: '#6366f1' },
-  { key: 'legal_review',   label: 'Legal Review',         color: '#f59e0b' },
-  { key: 'business_case',  label: 'Business Case',        color: '#10b981' },
-  { key: 'pricing',        label: 'Pricing Negotiation',  color: '#ef4444' },
+  { key: 'tech_review',    label: 'Tech Review',         color: '#6366f1', trigger: 'Starts when you send the documentation' },
+  { key: 'legal_review',   label: 'Legal Review',         color: '#f59e0b', trigger: 'Starts when you send the order' },
+  { key: 'business_case',  label: 'Business Case',        color: '#10b981', trigger: 'Starts when they ask for the business case' },
+  { key: 'pricing',        label: 'Pricing Negotiation',  color: '#ef4444', trigger: 'Starts when you share the price' },
 ]
 
 const TRACK_STATUSES = [
@@ -16,6 +16,24 @@ const TRACK_STATUSES = [
   { key: 'blocked',     label: 'Blocked',     color: '#ef4444' },
   { key: 'done',        label: 'Done',        color: '#22c55e' },
 ]
+
+// Days in an active status before it's flagged as stalled
+const TRACK_STALE_AMBER = 3
+const TRACK_STALE_RED = 5
+
+// Resolve a track's timeline (handles legacy rows that only have updated_at)
+function trackTiming(track) {
+  if (!track) return { startedAt: null, statusSince: null, totalDays: null, daysInStatus: null }
+  const status = track.status || 'not_started'
+  const startedAt = track.started_at || (status !== 'not_started' ? track.updated_at : null)
+  const statusSince = track.status_since || track.updated_at || null
+  return {
+    startedAt,
+    statusSince,
+    totalDays: startedAt ? daysAgo(startedAt) : null,
+    daysInStatus: statusSince ? daysAgo(statusSince) : null,
+  }
+}
 
 // Stage → auto-probability mapping
 const STAGE_PROBABILITY = {
@@ -1115,10 +1133,18 @@ export default function App() {
   }
 
   function updateTrack(trackId, status) {
+    const now = new Date().toISOString()
     setData(d => ({
       ...d,
-      tracks: d.tracks.map(t => t.id !== trackId ? t : {
-        ...t, status, updated_at: new Date().toISOString(),
+      tracks: d.tracks.map(t => {
+        if (t.id !== trackId) return t
+        if (t.status === status) return t // no-op (e.g. dropped on same column)
+        const next = { ...t, status, updated_at: now, status_since: now }
+        // First time it leaves "not started" → stamp the overall start date
+        if (status !== 'not_started' && !t.started_at) next.started_at = now
+        // Back to "not started" → reset the clock entirely
+        if (status === 'not_started') { next.started_at = ''; next.status_since = now }
+        return next
       }),
     }))
   }
@@ -2353,16 +2379,8 @@ function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLos
             </div>
           )}
 
-          {/* Process Tracks */}
-          <div style={{ marginTop: 20 }}>
-            <SectionLabel>Process Tracks</SectionLabel>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-              {TRACKS_CONFIG.map(tc => {
-                const t = tracks.find(x => x.track_name === tc.key)
-                return <TrackRow key={tc.key} trackConfig={tc} track={t} onUpdateTrack={onUpdateTrack} />
-              })}
-            </div>
-          </div>
+          {/* Process Tracks — Kanban */}
+          <ProcessTracksKanban tracks={tracks} onUpdateTrack={onUpdateTrack} />
 
           {/* Status fields */}
           <SectionLabel>Status</SectionLabel>
@@ -2414,31 +2432,119 @@ function MiniCard({ label, value, onClick, clickable }) {
   )
 }
 
-function TrackRow({ trackConfig, track, onUpdateTrack }) {
-  const currentStatus = track ? track.status : 'not_started'
+// ---- Process Tracks Kanban ----
+// 4 parallel processes (Tech / Legal / Business Case / Pricing) shown as a Kanban.
+// Drag a card between status columns; each card tracks total age + time-in-status + staleness.
+function ProcessTracksKanban({ tracks, onUpdateTrack }) {
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('storyly_tracks_collapsed') === '1' } catch { return false }
+  })
+  const [dragId, setDragId] = useState(null)
+  const [overCol, setOverCol] = useState(null)
+
+  function toggle() {
+    setCollapsed(c => { const n = !c; try { localStorage.setItem('storyly_tracks_collapsed', n ? '1' : '0') } catch {} return n })
+  }
+
+  // Resolve each config to its track row (create-on-the-fly fallback for display)
+  const rows = TRACKS_CONFIG.map(tc => ({ cfg: tc, track: tracks.find(x => x.track_name === tc.key) }))
+  const byStatus = (statusKey) => rows.filter(r => (r.track?.status || 'not_started') === statusKey)
+
+  // Summary for the collapsed header
+  const started = rows.filter(r => r.track && r.track.status !== 'not_started')
+  const inProg = rows.filter(r => r.track?.status === 'in_progress').length
+  const blocked = rows.filter(r => r.track?.status === 'blocked').length
+  const done = rows.filter(r => r.track?.status === 'done').length
+  const stalledCount = started.filter(r => {
+    const { daysInStatus } = trackTiming(r.track)
+    return (r.track.status === 'in_progress' || r.track.status === 'blocked') && daysInStatus != null && daysInStatus >= TRACK_STALE_AMBER
+  }).length
+
+  function handleDrop(statusKey) {
+    if (dragId) onUpdateTrack(dragId, statusKey)
+    setDragId(null); setOverCol(null)
+  }
+
   return (
-    <div style={{ ...cardStyle, padding: 12 }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: trackConfig.color, marginBottom: 8 }}>{trackConfig.label}</div>
-      <div style={{ display: 'flex', gap: 4 }}>
-        {TRACK_STATUSES.map((s, i) => {
-          const isActive = currentStatus === s.key
-          return (
-            <button
-              key={s.key}
-              onClick={() => track && onUpdateTrack(track.id, s.key)}
-              title={s.label}
-              style={{
-                flex: 1, height: 28, border: isActive ? `2px solid ${s.color}` : '2px solid #e2e8f0',
-                background: isActive ? s.color : '#f8fafc',
-                borderRadius: 4, cursor: 'pointer', transition: 'all 0.15s',
-                fontSize: 10, fontWeight: 600, color: isActive ? '#fff' : '#94a3b8',
-              }}
-            >
-              {s.label.split(' ')[0]}
-            </button>
-          )
-        })}
+    <div style={{ marginTop: 20, marginBottom: 20 }}>
+      {/* Header with collapse toggle */}
+      <div onClick={toggle} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: collapsed ? 0 : 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 0.5 }}>Process Tracks</span>
+          <span style={{ fontSize: 11, color: '#cbd5e1' }}>{collapsed ? '▸' : '▾'}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+          {inProg > 0 && <span style={{ color: '#3b82f6', fontWeight: 600 }}>{inProg} in progress</span>}
+          {blocked > 0 && <span style={{ color: '#ef4444', fontWeight: 600 }}>{blocked} blocked</span>}
+          {stalledCount > 0 && <span style={{ color: '#d97706', fontWeight: 600 }}>⚠ {stalledCount} stalled</span>}
+          {done > 0 && <span style={{ color: '#22c55e', fontWeight: 600 }}>{done} done</span>}
+          {started.length === 0 && <span style={{ color: '#94a3b8' }}>none started</span>}
+        </div>
       </div>
+
+      {!collapsed && (
+        <>
+          <div style={{ fontSize: 11, color: '#cbd5e1', marginBottom: 8 }}>Drag a card to update its status</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+            {TRACK_STATUSES.map(st => {
+              const cards = byStatus(st.key)
+              const isOver = overCol === st.key
+              return (
+                <div key={st.key}
+                  onDragOver={e => { e.preventDefault(); setOverCol(st.key) }}
+                  onDragLeave={() => setOverCol(o => o === st.key ? null : o)}
+                  onDrop={() => handleDrop(st.key)}
+                  style={{
+                    background: isOver ? st.color + '14' : '#f8fafc',
+                    border: `1.5px ${isOver ? 'dashed' : 'solid'} ${isOver ? st.color : '#e2e8f0'}`,
+                    borderRadius: 8, padding: 8, minHeight: 92, transition: 'all 0.12s',
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: st.color }} />
+                    <span style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.3 }}>{st.label}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {cards.map(({ cfg, track }) => (
+                      <TrackCard key={cfg.key} cfg={cfg} track={track} statusKey={st.key}
+                        onDragStart={() => track && setDragId(track.id)} onDragEnd={() => { setDragId(null); setOverCol(null) }} />
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function TrackCard({ cfg, track, statusKey, onDragStart, onDragEnd }) {
+  const { totalDays, daysInStatus } = trackTiming(track)
+  const isActive = statusKey === 'in_progress' || statusKey === 'blocked'
+  const stale = isActive && daysInStatus != null && daysInStatus >= TRACK_STALE_AMBER
+  const staleColor = daysInStatus != null && daysInStatus >= TRACK_STALE_RED ? '#ef4444' : '#d97706'
+  const dLabel = (n) => n == null ? '—' : n === 0 ? 'today' : n === 1 ? '1d' : `${n}d`
+  return (
+    <div draggable={!!track} onDragStart={onDragStart} onDragEnd={onDragEnd}
+      style={{
+        background: '#fff', border: `1px solid #e2e8f0`, borderLeft: `3px solid ${cfg.color}`,
+        borderRadius: 6, padding: '7px 8px', cursor: track ? 'grab' : 'default',
+        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+      }}>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: '#374151', lineHeight: 1.2 }}>{cfg.label}</div>
+      {statusKey === 'not_started' && (
+        <div style={{ fontSize: 9.5, color: '#94a3b8', marginTop: 3, lineHeight: 1.3 }}>{cfg.trigger}</div>
+      )}
+      {isActive && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 10, color: '#64748b' }}>Day {totalDays == null ? '?' : totalDays} · {dLabel(daysInStatus)} here</div>
+          {stale && <div style={{ fontSize: 9.5, color: staleColor, fontWeight: 700, marginTop: 1 }}>⚠ No movement in {dLabel(daysInStatus)}</div>}
+        </div>
+      )}
+      {statusKey === 'done' && (
+        <div style={{ fontSize: 10, color: '#22c55e', fontWeight: 600, marginTop: 4 }}>✓ {totalDays == null ? 'done' : `took ${totalDays}d`}</div>
+      )}
     </div>
   )
 }
