@@ -31,6 +31,10 @@ export default async function handler(req, res) {
     if (data.person) {
       const p = data.person
       const org = p.organization || {}
+      // Hook material — Apollo doesn't expose the LinkedIn role description, but the
+      // headline + company description + keywords are great fodder for an opener.
+      const keywords = Array.isArray(org.keywords) ? org.keywords.slice(0, 12).join(', ') : ''
+      const departments = Array.isArray(p.departments) ? p.departments.join(', ') : ''
       return res.status(200).json({
         full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
         title: p.title || '',
@@ -43,6 +47,12 @@ export default async function handler(req, res) {
         phone: (p.phone_numbers && p.phone_numbers[0]?.sanitized_number) || '',
         linkedin_url: p.linkedin_url || linkedin_url,
         photo_url: p.photo_url || '',
+        // Hook / context fields
+        headline: p.headline || '',
+        seniority: p.seniority || '',
+        departments,
+        company_description: org.short_description || org.seo_description || '',
+        keywords,
       })
     }
 

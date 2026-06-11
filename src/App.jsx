@@ -104,15 +104,21 @@ function accountStatusInfo(key) {
 }
 
 const LEAD_STAGES = [
-  { key: 'new',             label: 'New',             color: '#6366f1', bg: '#eef2ff' },
-  { key: 'researching',     label: 'Researching',     color: '#8b5cf6', bg: '#f5f3ff' },
-  { key: 'engaging',        label: 'Engaging',        color: '#3b82f6', bg: '#eff6ff' },
-  { key: 'nurturing',       label: 'Nurturing',       color: '#f59e0b', bg: '#fffbeb' },
-  { key: 'qualified',       label: 'Qualified',       color: '#22c55e', bg: '#f0fdf4' },
-  { key: 'converted',       label: 'Converted',       color: '#16a34a', bg: '#dcfce7' },
-  { key: 'not_interested',  label: 'Not Interested',  color: '#94a3b8', bg: '#f1f5f9' },
-  { key: 'unreachable',     label: 'Unreachable',     color: '#78716c', bg: '#f5f5f4' },
+  { key: 'new',                 label: 'New',                 color: '#6366f1', bg: '#eef2ff' },
+  { key: 'engaging',            label: 'Engaging',            color: '#3b82f6', bg: '#eff6ff' },
+  { key: 'nurturing',           label: 'Nurturing',           color: '#f59e0b', bg: '#fffbeb' },
+  { key: 'looking_for_meeting', label: 'Looking for Meeting', color: '#a855f7', bg: '#faf5ff' },
+  { key: 'meeting_scheduled',   label: 'Meeting Scheduled',   color: '#0ea5e9', bg: '#f0f9ff' },
+  { key: 'qualified',           label: 'Qualified',           color: '#22c55e', bg: '#f0fdf4' },
+  { key: 'converted',           label: 'Converted',           color: '#16a34a', bg: '#dcfce7' },
+  { key: 'not_interested',      label: 'Not Interested',      color: '#94a3b8', bg: '#f1f5f9' },
+  { key: 'unreachable',         label: 'Unreachable',         color: '#78716c', bg: '#f5f5f4' },
 ]
+
+// Active funnel order (for analytics + progression logic). Exits live outside this list.
+const LEAD_STAGE_ORDER = ['new', 'engaging', 'nurturing', 'looking_for_meeting', 'meeting_scheduled', 'qualified', 'converted']
+// Terminal stages — no cadence suggestions
+const LEAD_TERMINAL_STAGES = ['qualified', 'converted', 'not_interested', 'unreachable']
 
 const LEAD_SOURCES = [
   { key: 'outbound', label: 'Outbound',  color: '#3b82f6' },
@@ -129,11 +135,11 @@ function leadSourceInfo(key) {
   return LEAD_SOURCES.find(s => s.key === key) || LEAD_SOURCES[0]
 }
 
-// Activity channels and types for leads
+// Activity channels and types for leads. `brand` flags channels that render a brand logo.
 const ACTIVITY_CHANNELS = [
-  { key: 'linkedin', label: 'LinkedIn', icon: '🔗', color: '#0077b5' },
-  { key: 'email',    label: 'Email',    icon: '📧', color: '#6366f1' },
-  { key: 'whatsapp', label: 'WhatsApp', icon: '💬', color: '#25d366' },
+  { key: 'linkedin', label: 'LinkedIn', icon: '🔗', color: '#0077b5', brand: 'linkedin' },
+  { key: 'email',    label: 'Email',    icon: '📧', color: '#6366f1', brand: 'gmail' },
+  { key: 'whatsapp', label: 'WhatsApp', icon: '💬', color: '#25d366', brand: 'whatsapp' },
   { key: 'phone',    label: 'Phone',    icon: '📞', color: '#f59e0b' },
   { key: 'meeting',  label: 'Meeting',  icon: '📅', color: '#22c55e' },
   { key: 'other',    label: 'Other',    icon: '📋', color: '#94a3b8' },
@@ -141,15 +147,17 @@ const ACTIVITY_CHANNELS = [
 
 const ACTIVITY_TYPES = {
   linkedin: [
-    { key: 'connection_sent',     label: 'Connection request sent',   direction: 'outbound' },
     { key: 'connection_accepted', label: 'Connection accepted',       direction: 'inbound' },
     { key: 'dm_sent',             label: 'DM sent',                   direction: 'outbound' },
     { key: 'dm_received',         label: 'DM received',               direction: 'inbound' },
-    { key: 'inmail_sent',         label: 'InMail sent',               direction: 'outbound' },
-    { key: 'inmail_received',     label: 'InMail received',           direction: 'inbound' },
-    { key: 'post_comment',        label: 'Commented on their post',   direction: 'outbound', warmup: true },
-    { key: 'post_like',           label: 'Liked their post',          direction: 'outbound', warmup: true },
-    { key: 'post_repost',         label: 'Reposted their content',    direction: 'outbound', warmup: true },
+    { key: 'post_interaction',    label: 'Interact with their post',  direction: 'outbound', warmup: true },
+    // Legacy / auto — hidden from the manual dropdown but kept for label resolution
+    { key: 'connection_sent',     label: 'Connection request sent',   direction: 'outbound', hidden: true },
+    { key: 'inmail_sent',         label: 'InMail sent',               direction: 'outbound', hidden: true },
+    { key: 'inmail_received',     label: 'InMail received',           direction: 'inbound', hidden: true },
+    { key: 'post_comment',        label: 'Commented on their post',   direction: 'outbound', warmup: true, hidden: true },
+    { key: 'post_like',           label: 'Liked their post',          direction: 'outbound', warmup: true, hidden: true },
+    { key: 'post_repost',         label: 'Reposted their content',    direction: 'outbound', warmup: true, hidden: true },
   ],
   email: [
     { key: 'email_sent',     label: 'Email sent',     direction: 'outbound' },
@@ -208,7 +216,7 @@ function daysAgoLabel(dateStr) {
 // Calculates the suggested next action based on lead activities and state
 // Two modes: PRE-RESPONSE (touchpoint-based outreach) and NURTURING (post-response momentum)
 
-const WARMUP_TYPES = ['post_comment', 'post_like', 'post_repost']
+const WARMUP_TYPES = ['post_interaction', 'post_comment', 'post_like', 'post_repost']
 const PASSIVE_INBOUND = ['connection_accepted']
 const MAX_TOUCHPOINTS = 4
 
@@ -235,15 +243,32 @@ function calculateCadence(lead) {
   })
 
   // Dead stages — no cadence
-  if (['qualified', 'converted', 'not_interested', 'unreachable'].includes(lead.stage)) {
+  if (LEAD_TERMINAL_STAGES.includes(lead.stage)) {
     return null
   }
 
   // ==============================
-  // NURTURING CADENCE (post-response)
+  // MEETING SCHEDULED — prep / confirm
+  // ==============================
+  if (lead.stage === 'meeting_scheduled') {
+    const scheduledDate = lastDate('meeting', 'meeting_scheduled')
+    return {
+      action: 'Confirm & prepare for the meeting',
+      channel: 'meeting',
+      type: null,
+      waitDays: 0,
+      dueDate: null,
+      step: 1,
+      totalSteps: 1,
+      urgency: 'normal',
+    }
+  }
+
+  // ==============================
+  // NURTURING / LOOKING FOR MEETING (post-response)
   // Goal: maintain momentum → build rapport → get meeting
   // ==============================
-  if (hasResponse || lead.stage === 'nurturing') {
+  if (hasResponse || ['nurturing', 'looking_for_meeting'].includes(lead.stage)) {
     const sorted = [...activities].sort((a, b) => new Date(b.date) - new Date(a.date))
     const lastAct = sorted[0]
     const daysSinceLast = lastAct ? daysSince(lastAct.date) : null
@@ -254,6 +279,7 @@ function calculateCadence(lead) {
       return dir === 'inbound' && !PASSIVE_INBOUND.includes(a.type)
     })
     const mainChannel = lastInbound ? lastInbound.channel : 'linkedin'
+    const replyType = mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : mainChannel === 'whatsapp' ? 'whatsapp_sent' : null
 
     // Count real exchanges (non-warmup outbound + real inbound)
     const realOutbound = activities.filter(a => {
@@ -273,12 +299,25 @@ function calculateCadence(lead) {
       return 'normal'
     }
 
-    // After enough back-and-forth, suggest meeting
+    const lastDir = lastAct ? (lastAct.direction || activityDirection(lastAct.channel, lastAct.type)) : null
+
+    // LOOKING FOR MEETING — you've asked, now chase the confirmation
+    if (lead.stage === 'looking_for_meeting') {
+      if (lastDir === 'inbound') {
+        return { action: 'They replied — lock in a meeting time', channel: mainChannel, type: replyType, waitDays: 0, dueDate: null, step: 1, totalSteps: 2, urgency: nurtureUrgency(daysSinceLast) }
+      }
+      if (daysSinceLast !== null && daysSinceLast >= 2) {
+        return { action: 'Follow up on your meeting request', channel: mainChannel, type: replyType, waitDays: 2, dueDate: lastAct ? new Date(new Date(lastAct.date).getTime() + 2 * 86400000).toISOString().slice(0, 10) : null, step: 2, totalSteps: 2, urgency: 'overdue' }
+      }
+      return { action: 'Waiting on meeting confirmation', channel: null, type: null, waitDays: 2, dueDate: lastAct ? new Date(new Date(lastAct.date).getTime() + 2 * 86400000).toISOString().slice(0, 10) : null, step: 2, totalSteps: 2, urgency: 'waiting' }
+    }
+
+    // After enough back-and-forth, suggest moving to a meeting
     if (realOutbound >= 2 && realInbound >= 2) {
       return {
         action: 'Propose a meeting — enough rapport built',
         channel: mainChannel,
-        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        type: replyType,
         waitDays: 0,
         dueDate: null,
         step: 3,
@@ -288,14 +327,12 @@ function calculateCadence(lead) {
     }
 
     // First reply: keep momentum going
-    const lastDir = lastAct ? (lastAct.direction || activityDirection(lastAct.channel, lastAct.type)) : null
-
     if (lastDir === 'inbound') {
       // They wrote last — your turn to reply
       return {
         action: daysSinceLast >= 3 ? 'Reply now — conversation cooling!' : 'Reply to keep momentum',
         channel: mainChannel,
-        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        type: replyType,
         waitDays: 0,
         dueDate: null,
         step: Math.min(realOutbound + 1, 2),
@@ -309,7 +346,7 @@ function calculateCadence(lead) {
       return {
         action: 'Follow up — re-engage the conversation',
         channel: mainChannel,
-        type: mainChannel === 'email' ? 'email_sent' : mainChannel === 'linkedin' ? 'dm_sent' : null,
+        type: replyType,
         waitDays: 3,
         dueDate: lastAct ? new Date(new Date(lastAct.date).getTime() + 3 * 86400000).toISOString().slice(0, 10) : null,
         step: Math.min(realOutbound + 1, 2),
@@ -609,6 +646,14 @@ function WhatsAppIcon({ size = 15 }) {
     </svg>
   )
 }
+// Renders a channel's brand logo (LinkedIn/Gmail/WhatsApp) or its emoji fallback
+function ChannelIcon({ channel, size = 14 }) {
+  const info = activityChannelInfo(channel)
+  if (info.brand === 'linkedin') return <LinkedInIcon size={size} />
+  if (info.brand === 'gmail') return <GmailIcon size={size} />
+  if (info.brand === 'whatsapp') return <WhatsAppIcon size={size} />
+  return <span>{info.icon}</span>
+}
 
 function calcProbFromStage(stage) {
   return STAGE_PROBABILITY[stage] || 0
@@ -679,7 +724,9 @@ const overlayStyle = {
 
 export default function App() {
   const [data, setData] = useState(DEFAULT_DATA)
-  const [activeTab, setActiveTab] = useState('pipeline')
+  const [activeTab, setActiveTab] = useState(() => {
+    try { return localStorage.getItem('storyly_active_tab') || 'pipeline' } catch { return 'pipeline' }
+  })
   const [statusFilter, setStatusFilter] = useState('open')
   const [sort, setSort] = useState({ field: 'account_name', dir: 'asc' })
   const [visibleCols, setVisibleCols] = useState(defaultCols)
@@ -694,7 +741,13 @@ export default function App() {
   const [showNewAccount, setShowNewAccount] = useState(false)
   const [editAccount, setEditAccount] = useState(null)
   const [selectedAccountId, setSelectedAccountId] = useState(null)
-  const [prospectingSubTab, setProspectingSubTab] = useState('accounts')
+  const [prospectingSubTab, setProspectingSubTab] = useState(() => {
+    try { return localStorage.getItem('storyly_prospecting_subtab') || 'accounts' } catch { return 'accounts' }
+  })
+
+  // Persist the current view so a page refresh stays put instead of jumping to Home/Pipeline
+  useEffect(() => { try { localStorage.setItem('storyly_active_tab', activeTab) } catch {} }, [activeTab])
+  useEffect(() => { try { localStorage.setItem('storyly_prospecting_subtab', prospectingSubTab) } catch {} }, [prospectingSubTab])
 
   // Gmail state
   const [gmailConnected, setGmailConnected] = useState(false)
@@ -801,6 +854,8 @@ export default function App() {
       if (merged.leads && merged.leads.length > 0) {
         merged.leads = merged.leads.map(l => ({
           ...l,
+          // 'researching' stage was removed from the model — fold it back into 'new'
+          stage: l.stage === 'researching' ? 'new' : l.stage,
           activities: l.activities || [{ id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: l.created_at || new Date().toISOString(), note: 'Added to lead list' }],
           last_response_date: l.last_response_date || '',
         }))
@@ -1080,6 +1135,12 @@ export default function App() {
   function addLead(form) {
     const id = genId()
     const now = new Date().toISOString()
+    // Adding a lead implies the connection request was already sent (LinkedIn-first prospecting).
+    // Auto-log it so the lead starts at the right cadence step without a manual click.
+    const hasLinkedIn = !!(form.linkedin_url && form.linkedin_url.trim())
+    const initialActivity = hasLinkedIn
+      ? { id: genId(), channel: 'linkedin', type: 'connection_sent', direction: 'outbound', date: now, note: 'Auto-logged when lead was added' }
+      : { id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: now, note: 'Added to lead list' }
     const lead = {
       id,
       full_name: form.full_name || '',
@@ -1092,8 +1153,12 @@ export default function App() {
       country: form.country || '',
       source: form.source || 'outbound',
       stage: form.stage || 'new',
-      last_contact_date: form.last_contact_date || '',
-      last_contact_note: form.last_contact_note || '',
+      headline: form.headline || '',
+      company_description: form.company_description || '',
+      keywords: form.keywords || '',
+      seniority: form.seniority || '',
+      last_contact_date: form.last_contact_date || (hasLinkedIn ? now.slice(0, 10) : ''),
+      last_contact_note: form.last_contact_note || (hasLinkedIn ? 'Connection request sent' : ''),
       last_response_date: '',
       next_action: form.next_action || '',
       next_action_date: form.next_action_date || '',
@@ -1101,7 +1166,7 @@ export default function App() {
       notes: form.notes || '',
       account_id: form.account_id || '',
       deal_id: null,
-      activities: [{ id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: now, note: 'Added to lead list' }],
+      activities: [initialActivity],
       created_at: now,
       updated_at: now,
     }
@@ -1165,16 +1230,19 @@ export default function App() {
           if (!l.last_response_date || actDate >= l.last_response_date) {
             updates.last_response_date = actDate
           }
-          // Auto-progress: if lead is 'new' or 'engaging' and gets a real response → nurturing
-          if (['new', 'researching', 'engaging'].includes(l.stage)) {
-            updates.stage = 'nurturing'
-          }
         }
-        // Auto-progress: first outbound contact → engaging (warm-up actions don't count)
-        const isWarmup = isWarmupActivity(activity.channel, activity.type)
-        if (dir === 'outbound' && l.stage === 'new' && !isWarmup) {
-          updates.stage = 'engaging'
+        // ---- Stage auto-progression (only ever moves forward, never backward) ----
+        const curIdx = LEAD_STAGE_ORDER.indexOf(updates.stage || l.stage)
+        const advanceTo = (stage) => {
+          if (LEAD_TERMINAL_STAGES.includes(l.stage)) return // don't resurrect dead leads
+          if (LEAD_STAGE_ORDER.indexOf(stage) > curIdx) updates.stage = stage
         }
+        // Connection accepted → Engaging (now in conversation reach)
+        if (activity.type === 'connection_accepted') advanceTo('engaging')
+        // Real inbound response (DM/email/whatsapp/call received) → Nurturing
+        if (dir === 'inbound' && !isPassiveInbound) advanceTo('nurturing')
+        // Meeting scheduled → Meeting Scheduled
+        if (activity.type === 'meeting_scheduled') advanceTo('meeting_scheduled')
         return { ...l, ...updates }
       }),
     }))
@@ -1298,6 +1366,13 @@ export default function App() {
         const ca = calculateCadence(a), cb = calculateCadence(b)
         const av = ca ? (URGENCY_SORT[ca.urgency] ?? 5) : 5
         const bv = cb ? (URGENCY_SORT[cb.urgency] ?? 5) : 5
+        if (av !== bv) return leadSort.dir === 'asc' ? av - bv : bv - av
+        return 0
+      }
+      // Time-based columns: sort by age in days (oldest/most-stale first when desc)
+      if (leadSort.field === 'days_in_pipeline' || leadSort.field === 'last_action') {
+        const av = (leadSort.field === 'days_in_pipeline' ? daysAgo(a.created_at) : daysAgo(lastActivityDate(a))) ?? -1
+        const bv = (leadSort.field === 'days_in_pipeline' ? daysAgo(b.created_at) : daysAgo(lastActivityDate(b))) ?? -1
         if (av !== bv) return leadSort.dir === 'asc' ? av - bv : bv - av
         return 0
       }
@@ -2824,9 +2899,9 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
     { key: 'full_name', label: 'Name' },
     { key: 'title', label: 'Title' },
     { key: 'company', label: 'Company' },
-    { key: 'country', label: 'Country' },
-    { key: 'source', label: 'Source' },
     { key: 'stage', label: 'Stage' },
+    { key: 'days_in_pipeline', label: 'In Pipeline' },
+    { key: 'last_action', label: 'Last Action' },
     { key: 'cadence_urgency', label: 'Action' },
   ]
 
@@ -2858,7 +2933,6 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
         <tbody>
           {leads.map((lead, i) => {
             const si = leadStageInfo(lead.stage)
-            const src = leadSourceInfo(lead.source)
             const cadence = calculateCadence(lead)
             const urgencyStyles = {
               overdue:  { bg: '#fef2f2', color: '#ef4444', label: '⚠ Action Required' },
@@ -2879,13 +2953,29 @@ function LeadsTable({ leads, sort, handleSort, onSelectLead }) {
                 </td>
                 <td style={tdStyle}>{lead.title || '—'}</td>
                 <td style={tdStyle}>{lead.company || '—'}</td>
-                <td style={tdStyle}>{lead.country || '—'}</td>
-                <td style={tdStyle}>
-                  <span style={{ color: src.color, fontSize: 12, fontWeight: 500 }}>{src.label}</span>
-                </td>
                 <td style={tdStyle}>
                   <span style={{ background: si.bg, color: si.color, borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 500 }}>{si.label}</span>
                 </td>
+                {(() => {
+                  const inPipe = daysAgo(lead.created_at)
+                  const lastActDays = daysAgo(lastActivityDate(lead))
+                  // Color the "last action" by staleness so old ones jump out for prioritization
+                  const staleColor = lastActDays == null ? '#94a3b8' : lastActDays >= 5 ? '#ef4444' : lastActDays >= 3 ? '#d97706' : '#374151'
+                  return (
+                    <>
+                      <td style={tdStyle}>
+                        <span style={{ fontSize: 13, color: inPipe != null && inPipe >= 21 ? '#d97706' : '#374151' }}>
+                          {inPipe == null ? '—' : inPipe === 0 ? 'Today' : inPipe === 1 ? '1 day' : `${inPipe} days`}
+                        </span>
+                      </td>
+                      <td style={tdStyle}>
+                        <span style={{ fontSize: 13, fontWeight: lastActDays != null && lastActDays >= 3 ? 600 : 400, color: staleColor }}>
+                          {lastActDays == null ? '—' : lastActDays === 0 ? 'Today' : lastActDays === 1 ? 'Yesterday' : `${lastActDays}d ago`}
+                        </span>
+                      </td>
+                    </>
+                  )
+                })()}
                 <td style={tdStyle}>
                   {us ? (
                     <div>
@@ -2929,6 +3019,10 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
     country: lead?.country || '',
     source: lead?.source || 'outbound',
     stage: lead?.stage || 'new',
+    headline: lead?.headline || '',
+    seniority: lead?.seniority || '',
+    company_description: lead?.company_description || '',
+    keywords: lead?.keywords || '',
     last_contact_date: lead?.last_contact_date || '',
     last_contact_note: lead?.last_contact_note || '',
     next_action: lead?.next_action || '',
@@ -2991,6 +3085,10 @@ function LeadFormModal({ lead, accounts = [], onSave, onClose, onCreateAccount }
           company: data.company || f.company,
           industry: data.industry || f.industry,
           country: data.country || f.country,
+          headline: data.headline || f.headline,
+          seniority: data.seniority || f.seniority,
+          company_description: data.company_description || f.company_description,
+          keywords: data.keywords || f.keywords,
         }))
       } else {
         setEnrichError(data.error || 'Could not enrich this profile')
@@ -3176,9 +3274,12 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
   const activities = [...(lead.activities || [])].sort((a, b) => new Date(b.date) - new Date(a.date))
   const cadence = calculateCadence(lead)
 
+  // First non-hidden activity type for a channel (used as the form default)
+  const firstVisibleType = (ch) => ((ACTIVITY_TYPES[ch] || []).find(t => !t.hidden) || {}).key || ''
+
   const [showAddActivity, setShowAddActivity] = useState(false)
   const [actChannel, setActChannel] = useState('linkedin')
-  const [actType, setActType] = useState('connection_sent')
+  const [actType, setActType] = useState(() => firstVisibleType('linkedin'))
   const [actNote, setActNote] = useState('')
   const [actDate, setActDate] = useState(new Date().toISOString().slice(0, 10))
 
@@ -3189,15 +3290,14 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
     setShowAddActivity(false)
     // Reset to defaults
     setActChannel('linkedin')
-    setActType('connection_sent')
+    setActType(firstVisibleType('linkedin'))
     setActDate(new Date().toISOString().slice(0, 10))
   }
 
-  // When channel changes, auto-select first type of that channel
+  // When channel changes, auto-select first visible type of that channel
   function handleChannelChange(ch) {
     setActChannel(ch)
-    const types = ACTIVITY_TYPES[ch] || []
-    if (types.length > 0) setActType(types[0].key)
+    setActType(firstVisibleType(ch))
   }
 
   return (
@@ -3308,7 +3408,7 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
 
               {/* Action description */}
               <div style={{ fontSize: 14, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                {cadence.channel && activityChannelInfo(cadence.channel).icon} {cadence.action}
+                {cadence.channel && <ChannelIcon channel={cadence.channel} />} {cadence.action}
               </div>
 
               {/* Countdown + last-touch context */}
@@ -3416,6 +3516,42 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
             <MiniCard label="Source" value={<span style={{ color: src.color, fontWeight: 600 }}>{src.label}</span>} />
           </div>
 
+          {/* Hook / Context — engagement material pulled from Apollo */}
+          {(lead.headline || lead.company_description || lead.keywords || lead.seniority) && (
+            <>
+              <SectionLabel>Hook / Context</SectionLabel>
+              <div style={{ ...cardStyle, padding: 14, marginBottom: 20, background: '#fdfcff', border: '1px solid #ede9fe' }}>
+                {lead.headline && (
+                  <div style={{ marginBottom: lead.company_description || lead.keywords ? 10 : 0 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: '#a855f7', marginBottom: 2 }}>LINKEDIN HEADLINE</div>
+                    <div style={{ fontSize: 13, color: '#374151', fontStyle: 'italic' }}>"{lead.headline}"</div>
+                  </div>
+                )}
+                {(lead.seniority || lead.departments) && (
+                  <div style={{ marginBottom: lead.company_description || lead.keywords ? 10 : 0, fontSize: 12, color: '#64748b' }}>
+                    {[lead.seniority, lead.departments].filter(Boolean).join(' · ')}
+                  </div>
+                )}
+                {lead.company_description && (
+                  <div style={{ marginBottom: lead.keywords ? 10 : 0 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8', marginBottom: 2 }}>WHAT {(lead.company || 'THE COMPANY').toUpperCase()} DOES</div>
+                    <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.4 }}>{lead.company_description}</div>
+                  </div>
+                )}
+                {lead.keywords && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8', marginBottom: 4 }}>KEYWORDS</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {lead.keywords.split(',').map(k => k.trim()).filter(Boolean).slice(0, 12).map((k, i) => (
+                        <span key={i} style={{ fontSize: 11, background: '#f1f5f9', color: '#475569', borderRadius: 4, padding: '2px 7px' }}>{k}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           {/* Activity Timeline */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <SectionLabel style={{ margin: 0 }}>Activity Timeline</SectionLabel>
@@ -3436,8 +3572,9 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                       border: actChannel === ch.key ? `2px solid ${ch.color}` : '1px solid #e2e8f0',
                       background: actChannel === ch.key ? ch.color + '15' : '#fff',
                       color: actChannel === ch.key ? ch.color : '#64748b',
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
                     }}>
-                    {ch.icon} {ch.label}
+                    <ChannelIcon channel={ch.key} /> {ch.label}
                   </button>
                 ))}
               </div>
@@ -3446,7 +3583,7 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#64748b', marginBottom: 3 }}>Type</label>
                   <select value={actType} onChange={e => setActType(e.target.value)}
                     style={{ width: '100%', padding: '7px 8px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, background: '#fff' }}>
-                    {(ACTIVITY_TYPES[actChannel] || []).map(t => (
+                    {(ACTIVITY_TYPES[actChannel] || []).filter(t => !t.hidden).map(t => (
                       <option key={t.key} value={t.key}>
                         {t.direction === 'outbound' ? '↑ ' : t.direction === 'inbound' ? '↓ ' : ''}{t.label}
                       </option>
@@ -3495,8 +3632,8 @@ function LeadDetailPanel({ lead, onClose, onEdit, onDelete, onUpdateStage, onCon
                   {/* Content */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 500, color: '#374151' }}>
-                        <span style={{ color: ch.color, marginRight: 4 }}>{ch.icon}</span>
+                      <div style={{ fontSize: 13, fontWeight: 500, color: '#374151', display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <ChannelIcon channel={act.channel} />
                         {activityTypeLabel(act.channel, act.type)}
                         {isOutbound && <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 6 }}>SENT</span>}
                         {isInbound && <span style={{ fontSize: 10, color: '#22c55e', marginLeft: 6, fontWeight: 600 }}>RECEIVED</span>}
@@ -3734,6 +3871,17 @@ function CSVImportModal({ existingAccounts, onImport, onClose }) {
         lead.full_name = [firstName, lastName].filter(Boolean).join(' ')
       }
       if (!lead.full_name && !lead.company) return
+
+      // Adding a lead implies the connection request was already sent (LinkedIn-first)
+      const hasLinkedIn = !!(lead.linkedin_url && String(lead.linkedin_url).trim())
+      lead.last_response_date = ''
+      if (hasLinkedIn) {
+        lead.activities = [{ id: genId(), channel: 'linkedin', type: 'connection_sent', direction: 'outbound', date: now, note: 'Auto-logged when lead was added' }]
+        lead.last_contact_date = now.slice(0, 10)
+        lead.last_contact_note = 'Connection request sent'
+      } else {
+        lead.activities = [{ id: genId(), channel: 'other', type: 'note', direction: 'neutral', date: now, note: 'Added to lead list' }]
+      }
 
       const companyName = lead.company || ''
       if (companyName && !existingNames.has(companyName.toLowerCase()) && !accountMap.has(companyName.toLowerCase())) {
@@ -4032,7 +4180,7 @@ function getPeriods(view) {
 }
 
 // Stages in order for funnel calculation
-const LEAD_FUNNEL_STAGES = ['new', 'researching', 'engaging', 'nurturing', 'qualified', 'converted']
+const LEAD_FUNNEL_STAGES = ['new', 'engaging', 'nurturing', 'looking_for_meeting', 'meeting_scheduled', 'qualified', 'converted']
 
 // Activity types that count as a real first-touch message (not connection req, not warm-up)
 const MESSAGE_OUTBOUND_TYPES = ['dm_sent', 'inmail_sent', 'email_sent', 'whatsapp_sent', 'call_made']
