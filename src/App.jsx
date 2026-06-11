@@ -21,6 +21,46 @@ const TRACK_STATUSES = [
 const TRACK_STALE_AMBER = 3
 const TRACK_STALE_RED = 5
 
+// ---- Stakeholders ----
+const STAKEHOLDER_ROLES = [
+  { key: 'decision_maker', label: 'Decision Maker' },
+  { key: 'technical',      label: 'Technical' },
+  { key: 'legal',          label: 'Legal' },
+  { key: 'finance',        label: 'Finance / Procurement' },
+  { key: 'influencer',     label: 'Influencer' },
+  { key: 'end_user',       label: 'End User' },
+  { key: 'other',          label: 'Other' },
+]
+const STAKEHOLDER_SENTIMENTS = [
+  { key: 'champion', label: 'Champion', color: '#22c55e' },
+  { key: 'neutral',  label: 'Neutral',  color: '#94a3b8' },
+  { key: 'blocker',  label: 'Blocker',  color: '#ef4444' },
+]
+const STAKEHOLDER_SOURCES = {
+  lead:   { label: 'From lead', color: '#6366f1' },
+  manual: { label: 'Manual',    color: '#94a3b8' },
+  gmail:  { label: 'Gmail',     color: '#ef4444' },
+  grain:  { label: 'Grain',     color: '#10b981' },
+}
+function stakeholderRoleLabel(key) { return (STAKEHOLDER_ROLES.find(r => r.key === key) || {}).label || 'Other' }
+function stakeholderSentiment(key) { return STAKEHOLDER_SENTIMENTS.find(s => s.key === key) || STAKEHOLDER_SENTIMENTS[1] }
+
+// Default discovery topics to track per opportunity (covered / missing)
+const DISCOVERY_TOPICS = [
+  { key: 'pain',         label: 'Pain / Problem' },
+  { key: 'use_case',     label: 'Use case fit' },
+  { key: 'success',      label: 'Success metrics / KPIs' },
+  { key: 'budget',       label: 'Budget' },
+  { key: 'timeline',     label: 'Timeline' },
+  { key: 'decision',     label: 'Decision process' },
+  { key: 'stakeholders', label: 'Stakeholders / who else' },
+  { key: 'technical',    label: 'Technical requirements' },
+  { key: 'integration',  label: 'Integration / data' },
+  { key: 'security',     label: 'Security / Legal' },
+  { key: 'competition',  label: 'Competition / alternatives' },
+  { key: 'next_steps',   label: 'Next steps agreed' },
+]
+
 // Resolve a track's timeline (handles legacy rows that only have updated_at)
 function trackTiming(track) {
   if (!track) return { startedAt: null, statusSince: null, totalDays: null, daysInStatus: null }
@@ -839,6 +879,10 @@ export default function App() {
           activities: d.activities || [],
           next_step: d.next_step || '',
           next_step_date: d.next_step_date || '',
+          stakeholders: d.stakeholders || [],
+          insights: d.insights || [],
+          topics: d.topics || {},
+          transcripts: d.transcripts || [],
         }))
       }
       const existingNames = new Set((merged.deals || []).map(d => d.opportunity_name || d.account_name))
@@ -1075,6 +1119,10 @@ export default function App() {
       flowla_engagement: form.flowla_engagement || 'none',
       flowla_url: form.flowla_url || '',
       notes: form.notes || '',
+      stakeholders: [],
+      insights: [],
+      topics: {},
+      transcripts: [],
       created_at: now,
       updated_at: now,
     }
@@ -1097,6 +1145,58 @@ export default function App() {
         updated_at: new Date().toISOString(),
       }),
     }))
+  }
+
+  // Generic deal patcher — applies fn(deal) to the matching deal and stamps updated_at
+  function patchDeal(dealId, fn) {
+    const now = new Date().toISOString()
+    setData(d => ({
+      ...d,
+      deals: d.deals.map(deal => deal.id !== dealId ? deal : { ...fn(deal), updated_at: now }),
+    }))
+  }
+
+  function addStakeholder(dealId, s) {
+    patchDeal(dealId, deal => ({
+      ...deal,
+      stakeholders: [...(deal.stakeholders || []), { id: genId(), source: 'manual', created_at: new Date().toISOString(), ...s }],
+    }))
+  }
+  function updateStakeholder(dealId, sid, patch) {
+    patchDeal(dealId, deal => ({
+      ...deal,
+      stakeholders: (deal.stakeholders || []).map(s => s.id !== sid ? s : { ...s, ...patch }),
+    }))
+  }
+  function removeStakeholder(dealId, sid) {
+    patchDeal(dealId, deal => ({ ...deal, stakeholders: (deal.stakeholders || []).filter(s => s.id !== sid) }))
+  }
+  function addInsight(dealId, text) {
+    if (!text || !text.trim()) return
+    patchDeal(dealId, deal => ({
+      ...deal,
+      insights: [...(deal.insights || []), { id: genId(), text: text.trim(), created_at: new Date().toISOString() }],
+    }))
+  }
+  function removeInsight(dealId, iid) {
+    patchDeal(dealId, deal => ({ ...deal, insights: (deal.insights || []).filter(i => i.id !== iid) }))
+  }
+  function toggleTopic(dealId, topicKey) {
+    patchDeal(dealId, deal => {
+      const topics = { ...(deal.topics || {}) }
+      const cur = topics[topicKey] || { covered: false }
+      topics[topicKey] = { ...cur, covered: !cur.covered }
+      return { ...deal, topics }
+    })
+  }
+  function addTranscript(dealId, t) {
+    patchDeal(dealId, deal => ({
+      ...deal,
+      transcripts: [...(deal.transcripts || []), { id: genId(), source: 'manual', created_at: new Date().toISOString(), ...t }],
+    }))
+  }
+  function removeTranscript(dealId, tid) {
+    patchDeal(dealId, deal => ({ ...deal, transcripts: (deal.transcripts || []).filter(t => t.id !== tid) }))
   }
 
   function addActivity(dealId, activity) {
@@ -1301,6 +1401,24 @@ export default function App() {
       flowla_engagement: 'none',
       flowla_url: '',
       notes: lead.notes || '',
+      // A converted lead stops being a lead and becomes the first stakeholder
+      stakeholders: [{
+        id: genId(),
+        name: lead.full_name || '',
+        title: lead.title || '',
+        email: lead.email || '',
+        role: 'decision_maker',
+        sentiment: 'champion',
+        org_member: true,
+        source: 'lead',
+        lead_id: lead.id,
+        linkedin_url: lead.linkedin_url || '',
+        notes: 'Primary contact — converted from lead',
+        created_at: now,
+      }],
+      insights: [],
+      topics: {},
+      transcripts: [],
       created_at: now,
       updated_at: now,
     }
@@ -1590,6 +1708,15 @@ export default function App() {
           onReopen={() => setDealStatus(selectedDeal.id, 'open')}
           onUpdateTrack={updateTrack}
           onAddActivity={(activity) => addActivity(selectedDeal.id, activity)}
+          leads={data.leads || []}
+          onAddStakeholder={(s) => addStakeholder(selectedDeal.id, s)}
+          onUpdateStakeholder={(sid, patch) => updateStakeholder(selectedDeal.id, sid, patch)}
+          onRemoveStakeholder={(sid) => removeStakeholder(selectedDeal.id, sid)}
+          onAddInsight={(text) => addInsight(selectedDeal.id, text)}
+          onRemoveInsight={(iid) => removeInsight(selectedDeal.id, iid)}
+          onToggleTopic={(k) => toggleTopic(selectedDeal.id, k)}
+          onAddTranscript={(t) => addTranscript(selectedDeal.id, t)}
+          onRemoveTranscript={(tid) => removeTranscript(selectedDeal.id, tid)}
         />
       )}
       {deletingDeal && (
@@ -2186,7 +2313,7 @@ function DealFormModal({ deal, accounts = [], onSave, onClose, onCreateAccount }
 
 // ---- Deal Detail Panel ----
 
-function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onAddActivity, gmailConnected, onFetchEmails }) {
+function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLost, onReopen, onUpdateTrack, onAddActivity, gmailConnected, onFetchEmails, leads, onAddStakeholder, onUpdateStakeholder, onRemoveStakeholder, onAddInsight, onRemoveInsight, onToggleTopic, onAddTranscript, onRemoveTranscript }) {
   const prob = deal.probability || 0
   const fc = forecastCat(prob)
   const si = statusInfo(deal.deal_status)
@@ -2382,6 +2509,18 @@ function DealDetailPanel({ deal, tracks, onClose, onEdit, onDelete, onWon, onLos
           {/* Process Tracks — Kanban */}
           <ProcessTracksKanban tracks={tracks} onUpdateTrack={onUpdateTrack} />
 
+          {/* Stakeholders */}
+          <StakeholdersSection deal={deal} leads={leads} onAdd={onAddStakeholder} onUpdate={onUpdateStakeholder} onRemove={onRemoveStakeholder} />
+
+          {/* Discovery Topics */}
+          <DiscoveryTopicsSection deal={deal} onToggle={onToggleTopic} />
+
+          {/* Insights */}
+          <InsightsSection deal={deal} onAdd={onAddInsight} onRemove={onRemoveInsight} />
+
+          {/* Grain Transcripts */}
+          <TranscriptsSection deal={deal} onAdd={onAddTranscript} onRemove={onRemoveTranscript} />
+
           {/* Status fields */}
           <SectionLabel>Status</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 20 }}>
@@ -2549,7 +2688,252 @@ function TrackCard({ cfg, track, statusKey, onDragStart, onDragEnd }) {
   )
 }
 
-// (ProbabilityScorerModal removed — probability now auto-calculated from stage)
+// ---- Stakeholders section ----
+function StakeholdersSection({ deal, leads, onAdd, onUpdate, onRemove }) {
+  const stakeholders = deal.stakeholders || []
+  const [showAdd, setShowAdd] = useState(false)
+  const [form, setForm] = useState({ name: '', title: '', email: '', role: 'decision_maker', sentiment: 'neutral' })
+
+  // Leads tied to this deal's account that aren't already stakeholders → quick-add as referrals
+  const linkedEmails = new Set(stakeholders.map(s => (s.email || '').toLowerCase()).filter(Boolean))
+  const linkedLeadIds = new Set(stakeholders.map(s => s.lead_id).filter(Boolean))
+  const candidateLeads = (leads || []).filter(l =>
+    deal.account_id && l.account_id === deal.account_id &&
+    !linkedLeadIds.has(l.id) && !(l.email && linkedEmails.has(l.email.toLowerCase()))
+  )
+
+  function submitNew(e) {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    onAdd({ ...form, org_member: true, source: 'manual' })
+    setForm({ name: '', title: '', email: '', role: 'decision_maker', sentiment: 'neutral' })
+    setShowAdd(false)
+  }
+  function addFromLead(l) {
+    onAdd({ name: l.full_name || '', title: l.title || '', email: l.email || '', role: 'influencer', sentiment: 'neutral', org_member: true, source: 'lead', lead_id: l.id, linkedin_url: l.linkedin_url || '' })
+  }
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <SectionLabel>Stakeholders {stakeholders.length > 0 && <span style={{ color: '#cbd5e1' }}>({stakeholders.length})</span>}</SectionLabel>
+        <button onClick={() => setShowAdd(s => !s)} style={{ ...btnSecondary, fontSize: 12, padding: '5px 12px' }}>+ Add</button>
+      </div>
+
+      {stakeholders.length === 0 && !showAdd && (
+        <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: '#94a3b8', background: '#f8fafc' }}>
+          No stakeholders yet. They'll be added automatically from converted leads, Gmail and Grain — or add one manually.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {stakeholders.map(s => {
+          const sent = stakeholderSentiment(s.sentiment)
+          const srcInfo = STAKEHOLDER_SOURCES[s.source] || STAKEHOLDER_SOURCES.manual
+          return (
+            <div key={s.id} style={{ ...cardStyle, padding: 10, borderLeft: `3px solid ${sent.color}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{s.name || '—'}</span>
+                    {s.linkedin_url && <a href={s.linkedin_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}><LinkedInIcon size={13} /></a>}
+                    <span style={{ fontSize: 9, fontWeight: 700, color: srcInfo.color, background: srcInfo.color + '15', borderRadius: 3, padding: '1px 5px' }}>{srcInfo.label}</span>
+                  </div>
+                  {s.title && <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>{s.title}</div>}
+                  {s.email && <div style={{ fontSize: 11, color: '#94a3b8' }}>{s.email}</div>}
+                </div>
+                <button onClick={() => onRemove(s.id)} style={{ background: 'none', border: 'none', color: '#cbd5e1', cursor: 'pointer', fontSize: 14, flexShrink: 0 }}>✕</button>
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                <select value={s.role || 'other'} onChange={e => onUpdate(s.id, { role: e.target.value })}
+                  style={{ fontSize: 11, padding: '3px 6px', border: '1px solid #e2e8f0', borderRadius: 5, background: '#fff', color: '#475569' }}>
+                  {STAKEHOLDER_ROLES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+                </select>
+                <select value={s.sentiment || 'neutral'} onChange={e => onUpdate(s.id, { sentiment: e.target.value })}
+                  style={{ fontSize: 11, padding: '3px 6px', border: '1px solid #e2e8f0', borderRadius: 5, background: '#fff', color: sent.color, fontWeight: 600 }}>
+                  {STAKEHOLDER_SENTIMENTS.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}
+                </select>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Quick-add referrals from leads on the same account */}
+      {candidateLeads.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 4 }}>ADD FROM LEADS ON THIS ACCOUNT</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {candidateLeads.slice(0, 8).map(l => (
+              <button key={l.id} onClick={() => addFromLead(l)} style={{ ...btnSecondary, fontSize: 11, padding: '4px 10px' }}>
+                + {l.full_name}{l.title ? ` · ${l.title}` : ''}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showAdd && (
+        <form onSubmit={submitNew} style={{ ...cardStyle, padding: 12, marginTop: 10, background: '#f8fafc' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+            <input autoFocus placeholder="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+            <input placeholder="Title / role" value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
+              style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+            <input placeholder="Email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+              style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+            <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}
+              style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, background: '#fff' }}>
+              {STAKEHOLDER_ROLES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button type="button" onClick={() => setShowAdd(false)} style={{ ...btnSecondary, fontSize: 12, padding: '6px 12px' }}>Cancel</button>
+            <button type="submit" style={{ ...btnPrimary, fontSize: 12, padding: '6px 12px' }}>Add stakeholder</button>
+          </div>
+        </form>
+      )}
+    </div>
+  )
+}
+
+// ---- Discovery Topics checklist ----
+function DiscoveryTopicsSection({ deal, onToggle }) {
+  const topics = deal.topics || {}
+  const coveredCount = DISCOVERY_TOPICS.filter(t => topics[t.key]?.covered).length
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <SectionLabel>Discovery Topics</SectionLabel>
+        <span style={{ fontSize: 11, fontWeight: 600, color: coveredCount === DISCOVERY_TOPICS.length ? '#22c55e' : '#64748b' }}>
+          {coveredCount}/{DISCOVERY_TOPICS.length} covered
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        {DISCOVERY_TOPICS.map(t => {
+          const covered = !!topics[t.key]?.covered
+          return (
+            <button key={t.key} onClick={() => onToggle(t.key)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left', cursor: 'pointer',
+                padding: '7px 10px', borderRadius: 6, fontSize: 12,
+                border: `1px solid ${covered ? '#bbf7d0' : '#e2e8f0'}`,
+                background: covered ? '#f0fdf4' : '#fff',
+                color: covered ? '#166534' : '#64748b',
+              }}>
+              <span style={{
+                width: 16, height: 16, borderRadius: 4, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                border: `1.5px solid ${covered ? '#22c55e' : '#cbd5e1'}`, background: covered ? '#22c55e' : '#fff',
+                color: '#fff', fontSize: 11, fontWeight: 700,
+              }}>{covered ? '✓' : ''}</span>
+              {t.label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ---- Insights section ----
+function InsightsSection({ deal, onAdd, onRemove }) {
+  const insights = deal.insights || []
+  const [text, setText] = useState('')
+  function submit(e) { e.preventDefault(); if (!text.trim()) return; onAdd(text); setText('') }
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <SectionLabel>Insights {insights.length > 0 && <span style={{ color: '#cbd5e1' }}>({insights.length})</span>}</SectionLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+        {insights.map(i => (
+          <div key={i.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, ...cardStyle, padding: '8px 10px', background: '#fffdf5', border: '1px solid #fde68a' }}>
+            <span style={{ color: '#f59e0b', fontSize: 13, lineHeight: 1.4 }}>💡</span>
+            <span style={{ fontSize: 12.5, color: '#374151', flex: 1, lineHeight: 1.4 }}>{i.text}</span>
+            <button onClick={() => onRemove(i.id)} style={{ background: 'none', border: 'none', color: '#cbd5e1', cursor: 'pointer', fontSize: 13 }}>✕</button>
+          </div>
+        ))}
+      </div>
+      <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+        <input value={text} onChange={e => setText(e.target.value)} placeholder="Add an insight from your conversations…"
+          style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+        <button type="submit" style={{ ...btnSecondary, fontSize: 12, padding: '6px 14px' }}>Add</button>
+      </form>
+    </div>
+  )
+}
+
+// ---- Grain Transcripts section (manual paste; Grain/AI auto-import wired later) ----
+function TranscriptsSection({ deal, onAdd, onRemove }) {
+  const transcripts = deal.transcripts || []
+  const [collapsed, setCollapsed] = useState(true)
+  const [showAdd, setShowAdd] = useState(false)
+  const [form, setForm] = useState({ title: '', date: new Date().toISOString().slice(0, 10), text: '' })
+  const [expanded, setExpanded] = useState(null)
+
+  function submit(e) {
+    e.preventDefault()
+    if (!form.text.trim()) return
+    onAdd({ title: form.title.trim() || 'Call transcript', date: form.date, text: form.text.trim(), source: 'manual' })
+    setForm({ title: '', date: new Date().toISOString().slice(0, 10), text: '' })
+    setShowAdd(false); setCollapsed(false)
+  }
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div onClick={() => setCollapsed(c => !c)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: collapsed ? 0 : 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <SectionLabel>Grain Transcripts {transcripts.length > 0 && <span style={{ color: '#cbd5e1' }}>({transcripts.length})</span>}</SectionLabel>
+          <span style={{ fontSize: 11, color: '#cbd5e1' }}>{collapsed ? '▸' : '▾'}</span>
+        </div>
+        <button onClick={(e) => { e.stopPropagation(); setShowAdd(true); setCollapsed(false) }} style={{ ...btnSecondary, fontSize: 12, padding: '5px 12px' }}>+ Paste</button>
+      </div>
+
+      {!collapsed && (
+        <>
+          {transcripts.length === 0 && !showAdd && (
+            <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: '#94a3b8', background: '#f8fafc' }}>
+              No transcripts yet. Paste a Grain transcript here — auto-import and AI analysis come next.
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {transcripts.map(t => (
+              <div key={t.id} style={{ ...cardStyle, padding: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <div style={{ cursor: 'pointer', minWidth: 0 }} onClick={() => setExpanded(e => e === t.id ? null : t.id)}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{t.title}</span>
+                    <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 8 }}>{fmtDate(t.date)}</span>
+                  </div>
+                  <button onClick={() => onRemove(t.id)} style={{ background: 'none', border: 'none', color: '#cbd5e1', cursor: 'pointer', fontSize: 13, flexShrink: 0 }}>✕</button>
+                </div>
+                {expanded === t.id && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', background: '#f8fafc', borderRadius: 6, padding: 10, lineHeight: 1.5 }}>
+                    {t.text}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {showAdd && (
+            <form onSubmit={submit} style={{ ...cardStyle, padding: 12, marginTop: 10, background: '#f8fafc' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 8 }}>
+                <input placeholder="Title (e.g. Discovery call)" value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
+                  style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+                <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
+                  style={{ padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }} />
+              </div>
+              <textarea autoFocus placeholder="Paste the Grain transcript here…" value={form.text} onChange={e => setForm(f => ({ ...f, text: e.target.value }))}
+                style={{ width: '100%', minHeight: 120, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12, fontFamily: 'inherit', resize: 'vertical' }} />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+                <button type="button" onClick={() => setShowAdd(false)} style={{ ...btnSecondary, fontSize: 12, padding: '6px 12px' }}>Cancel</button>
+                <button type="submit" style={{ ...btnPrimary, fontSize: 12, padding: '6px 12px' }}>Save transcript</button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
 
 // ---- Delete Confirm Modal ----
 
